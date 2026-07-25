@@ -1,9 +1,7 @@
 //! Reasoning-effort policy.
 //!
 //! Normalizes caller effort into the frozen canonical set and decides the wire
-//! encoding by provider bucket. External behavior matches the Python bridge's
-//! `reasoning_policy.py`; the internal shape is a small enum + match rather than
-//! the Python dataclass/regex-tuple layout.
+//! encoding by provider bucket. Modeled as a small enum + match.
 
 use std::sync::OnceLock;
 
@@ -80,7 +78,6 @@ fn select_bucket(model: &str) -> Bucket {
 }
 
 /// Normalize an arbitrary caller-supplied effort value into the canonical set.
-/// Mirrors the Python normalization table exactly.
 pub fn normalize_canonical_effort(value: Option<&str>) -> CanonicalEffort {
     let raw = match value {
         Some(v) => v.trim().to_ascii_lowercase(),
@@ -114,12 +111,6 @@ pub fn wire_reasoning_effort(model: &str, effort: CanonicalEffort) -> Option<&'s
 // --------------------------------------------------------------------------- #
 // Inline `<think>` parsing and explicit reasoning-field extraction.
 //
-// Mirrors the Python bridge's `reasoning/inline.py` (`split_inline_think`) and
-// `reasoning/field.py` (`extract_reasoning_field`). The streaming partial-tag
-// helpers (`could_be_partial_think_open`, `trailing_partial_close_len`) and the
-// anchored open-match / close-search exposers are used by the inline-think SSE
-// state machine.
-// --------------------------------------------------------------------------- #
 
 fn think_open_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -163,7 +154,7 @@ pub fn split_inline_think(text: &str) -> Option<(String, String)> {
 }
 
 // --------------------------------------------------------------------------- #
-// Streaming inline-think helpers (mirror `reasoning/inline.py`).
+// Streaming inline-think helpers.
 //
 // Used by the inline-think SSE state machine to detect a `<think>` prefix and
 // a `</think>` close tag that may be split across chunk boundaries.
@@ -177,9 +168,8 @@ const CLOSE_TAG: &str = "</think>";
 const CLOSE_TAG_ALT: &str = "</thinking>";
 const CLOSE_STEMS: [&str; 2] = ["</think", "</thinking"];
 
-/// Match an open think tag anchored at the *start* of `buf` (mirrors Python's
-/// `THINK_OPEN_RE.match`). Returns the byte offset just past the tag when it
-/// matches at position 0, else `None`.
+/// Match an open think tag anchored at the *start* of `buf`. Returns the byte
+/// offset just past the tag when it matches at position 0, else `None`.
 pub fn match_think_open_at_start(buf: &str) -> Option<usize> {
     let m = think_open_re().find(buf)?;
     if m.start() == 0 {
@@ -189,14 +179,13 @@ pub fn match_think_open_at_start(buf: &str) -> Option<usize> {
     }
 }
 
-/// Search for the first close think tag anywhere in `text` (mirrors
-/// `THINK_CLOSE_RE.search`). Returns `(start, end)` byte offsets.
+/// Search for the first close think tag anywhere in `text`. Returns
+/// `(start, end)` byte offsets.
 pub fn find_think_close(text: &str) -> Option<(usize, usize)> {
     think_close_re().find(text).map(|m| (m.start(), m.end()))
 }
 
 /// Return true if `buffer` could still grow into a valid open think tag.
-/// Mirrors `could_be_partial_think_open`.
 pub fn could_be_partial_think_open(buffer: &str) -> bool {
     let b = buffer.trim_start().to_ascii_lowercase();
     if b.is_empty() {
@@ -217,7 +206,6 @@ pub fn could_be_partial_think_open(buffer: &str) -> bool {
 
 /// Length (in bytes) of the longest trailing run of `text` that could start a
 /// close think tag, so a `</think>` split across chunks can be held back.
-/// Mirrors `trailing_partial_close_len`. Returns 0 when no suffix qualifies.
 pub fn trailing_partial_close_len(text: &str) -> usize {
     let lowered = text.to_ascii_lowercase();
     // Operate on chars to keep suffix slicing on valid boundaries; return the

@@ -1,11 +1,5 @@
 //! In-memory session store for `previous_response_id` continuation.
 //!
-//! Mirrors the Python bridge's `protocol/session_store.py`: a per-process,
-//! TTL-bounded, size-capped map of `response_id` → snapshot of the messages,
-//! tool context, model, and reasoning cache for one completed Responses turn.
-//! State is deep-cloned on the way in and out so a stored snapshot can never be
-//! mutated by a later turn that shares structure with it. The store is
-//! intentionally non-durable — a restart drops all sessions, matching Python.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};

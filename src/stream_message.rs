@@ -1,30 +1,5 @@
 //! Message increment state machine for the streaming path.
 //!
-//! Mirrors the Python bridge's `stream_state/message.py`. Tracks the assistant
-//! `message` output item across the stream — its ordered content parts (text
-//! segments and refusals) and per-segment annotations:
-//!
-//! * the first text/refusal lazily emits `output_item.added` (a `message` item
-//!   in `in_progress`);
-//! * each text segment emits `content_part.added` when opened and accumulates
-//!   `output_text.delta`s; `flush_open_text_part` (or `finalize`) closes it with
-//!   `output_text.done` + `content_part.done`;
-//! * a refusal is emitted as an immediately-closed part (`content_part.added` +
-//!   `content_part.done`);
-//! * `finalize` closes every open text part, then emits `output_item.done` and
-//!   registers the completed `message` item with the envelope in output order.
-//!
-//! Annotations arriving before a text segment is open are held pending and
-//! attached to the next segment; annotations arriving mid-segment extend the
-//! open one. `content_index` is the part's position in the content array.
-//!
-//! Python keeps a parallel `parts` list beside `segments`; because the two grow
-//! in lockstep (one part per segment) the Rust model derives the content parts
-//! from `segments` directly, dropping the duplicate.
-//!
-//! Driven by the top-level stream orchestrator that lands in a later layer, so
-//! the state machine reads as dead until it wires in. Tests lock in the event
-//! sequence now.
 
 use std::collections::HashSet;
 

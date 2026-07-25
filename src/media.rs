@@ -7,7 +7,6 @@
 //! allowed. `http://`, `file://`, and `https://` pointing at loopback/private/
 //! link-local/reserved IPs (cloud-metadata exfiltration vectors) are rejected.
 //!
-//! Mirrors the Python bridge's `responses_to_chat/media.py`.
 
 use std::net::IpAddr;
 

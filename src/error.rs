@@ -1,9 +1,5 @@
 //! Bridge error type and its HTTP rendering.
 //!
-//! Mirrors the Python `BridgeError` hierarchy's *wire* contract (a JSON
-//! `{ "error": { message, type, code, ... } }` envelope with a status code),
-//! but as a single enum with `IntoResponse` so the compiler enforces that every
-//! variant maps to a status and body.
 
 use axum::{
     http::StatusCode,
@@ -146,13 +142,6 @@ impl BridgeError {
         if let Self::UnsupportedInputItem { item_type, .. } = self {
             error["item_type"] = json!(item_type);
         }
-        // Mirror Python `_error_param`: the upstream/validation detail is
-        // rendered as a single sorted-key JSON *string* under `param` (not a
-        // structured `detail` object), so the wire envelope is byte-compatible
-        // with the Python bridge. A plain-string detail passes through verbatim;
-        // any other JSON value is serialized with sorted keys (serde_json's Map
-        // is BTreeMap here — `preserve_order` is off — so `to_string` already
-        // emits sorted keys, matching orjson OPT_SORT_KEYS).
         if let Self::InvalidRequest {
             detail: Some(d), ..
         }
@@ -208,8 +197,6 @@ mod tests {
             Some(detail.clone()),
         );
         assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
-        // Mirrors Python `_error_param`: detail is rendered as a sorted-key
-        // JSON string under `param`, not a structured `detail` object.
         assert_eq!(
             err.envelope()["error"]["param"],
             json!(r#"{"error":{"message":"rate limited"}}"#)

@@ -1,12 +1,5 @@
 //! Responses SSE event constructors — thin builders over [`crate::sse`].
 //!
-//! Mirrors the Python bridge's `stream_state/tool_events.py`. Every function
-//! renders one Responses streaming event: it wraps the typed payload in the
-//! `{ "type": <event>, ... }` envelope and serializes it as a single SSE frame
-//! whose `event:` name matches the payload `type`.
-//!
-//! These are shared by the reasoning / message / tool increment state machines
-//! that land in the following layers, so they read as dead until those wire in.
 
 use serde_json::{json, Value};
 

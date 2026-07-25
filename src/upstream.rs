@@ -59,8 +59,6 @@ impl Upstream {
 
     /// Fetch the upstream model catalogue, returning the raw `data` array.
     ///
-    /// Mirrors the Python bridge: a bare list or a `{"data": [...]}` envelope
-    /// both resolve to the inner list; anything else yields an empty list.
     pub async fn list_models(&self) -> Result<Vec<Value>, BridgeError> {
         let url = self.config.models_url();
         let resp = self
@@ -148,15 +146,13 @@ impl Upstream {
     /// 4xx/5xx bodies are returned as-is — the caller owns the request body, so
     /// the bridge does not second-guess client parameters. Only network faults
     /// and retryable statuses (429/5xx) trigger a retry, and the body is never
-    /// mutated between attempts. Mirrors the Python bridge's
-    /// `UpstreamExecutor.relay_with_retry`.
+    /// mutated between attempts.
     pub async fn relay_chat_completion(
         &self,
         body: Map<String, Value>,
     ) -> Result<reqwest::Response, BridgeError> {
         let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         // Records the whole relay retry loop's duration on any exit path,
-        // mirroring the Python `relay_retry` phase.
         let _phase = crate::metrics::PhaseTimer::start(
             crate::metrics::PhaseKind::Facade,
             "relay_retry",
@@ -227,7 +223,6 @@ impl Upstream {
         is_stream: bool,
     ) -> Result<reqwest::Response, BridgeError> {
         // Records the whole transport retry loop's duration on any exit path,
-        // mirroring the Python `request_retry` phase (`_run_retry_loop`).
         let _phase = crate::metrics::PhaseTimer::start(
             crate::metrics::PhaseKind::Facade,
             "request_retry",
@@ -366,8 +361,7 @@ enum SendOutcome {
 /// Read an upstream error response into a JSON detail value: the parsed body
 /// when it is JSON, otherwise the raw text wrapped as a string, otherwise null.
 async fn read_error_detail(resp: reqwest::Response, is_stream: bool) -> Value {
-    // Times the error-body read, mirroring the Python `read_error_text`
-    // transport phase.
+    // Times the error-body read as a distinct transport phase.
     let _phase = crate::metrics::PhaseTimer::start(
         crate::metrics::PhaseKind::Transport,
         "read_error_text",

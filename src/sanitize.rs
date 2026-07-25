@@ -1,10 +1,5 @@
 //! Shared text sanitization.
 //!
-//! Mirrors the Python bridge's `text_utils.sanitize_string`: strip NUL and
-//! control characters below `0x20`, but preserve `\n`, `\r`, `\t`. Both
-//! conversion directions route text/reasoning/call-id/tool-name strings
-//! through here before they reach the upstream or the client, so raw control
-//! characters cannot cause upstream injection or parser confusion.
 
 /// Remove control characters `< 0x20` except newline/carriage-return/tab.
 ///

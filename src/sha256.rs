@@ -96,8 +96,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     s
 }
 
-/// First 16 hex chars of the SHA-256 digest of `data`. Mirrors the Python
-/// bridge's `short_sha256_hex` used for namespace-name collision suffixes.
+/// First 16 hex chars of the SHA-256 digest of `data`.
 pub fn sha256_hex_16(data: &[u8]) -> String {
     let mut s = sha256_hex(data);
     s.truncate(16);

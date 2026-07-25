@@ -2,16 +2,7 @@
 //!
 //! Composes the four increment state machines (envelope, reasoning, message,
 //! tools) plus the inline-`<think>` detector, and drives them from upstream
-//! Chat Completions SSE deltas. Mirrors the Python bridge's
-//! `stream_responses_state.ResponsesStreamState`.
-//!
-//! Borrow model: `inline_think` and the three sub-states are all disjoint
-//! fields of `self`, so routing a content delta borrows each field
-//! independently (`&mut self.inline_think` alongside `&mut self.envelope` etc.)
-//! rather than through a `self`-consuming method.
-//!
-//! `build_assistant_message` (session persistence) is intentionally omitted
-//! here; it needs the `ChatMessage` type that lands with the session layer.
+//! Chat Completions SSE deltas.
 
 use serde_json::{Map, Value};
 
@@ -91,8 +82,7 @@ impl ResponsesStreamState {
     ///
     /// A tool call arriving mid-`<think>` means the model is done thinking, so
     /// force the inline-think detector to text first (flushing buffered
-    /// reasoning) before the tool item opens. Mirrors the Python driver's
-    /// `force_to_text` call ahead of `push_tool_call_delta`.
+    /// reasoning) before the tool item opens.
     pub fn push_tool_call_delta(
         &mut self,
         tool_call: &Value,
@@ -202,8 +192,7 @@ impl ResponsesStreamState {
     /// the tool store, visible content from the message segments (falling back
     /// to the concatenated text), and reasoning from the reasoning state. Text
     /// fields are sanitized; reasoning is additionally stripped because it is
-    /// structural separator content, not user-visible text. Mirrors
-    /// `ResponsesStreamState.build_assistant_message`.
+    /// structural separator content, not user-visible text.
     pub fn build_assistant_message(&self) -> Option<Value> {
         let tool_calls = self.tools.persisted_tool_calls();
 
@@ -256,9 +245,7 @@ impl ResponsesStreamState {
 
     /// Whether this finalized turn is safe to persist for `previous_response_id`
     /// continuation: the envelope reached a terminal state and that state maps
-    /// to a persistable status (`completed` / `in_progress`). Mirrors the
-    /// streaming path's `state.envelope.completed and
-    /// should_persist_response_status(state.envelope.status)` guard.
+    /// to a persistable status (`completed` / `in_progress`).
     pub fn should_persist(&self) -> bool {
         self.envelope.completed
             && crate::convert::should_persist_response_status(self.envelope.status)

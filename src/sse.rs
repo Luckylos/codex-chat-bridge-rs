@@ -1,20 +1,5 @@
 //! Server-Sent Events frame codec — pure functions, no async or I/O.
 //!
-//! Mirrors the Python bridge's `protocol/sse.py`. The streaming path needs two
-//! directions:
-//!
-//! * **inbound** — [`extract_block`] carves complete frames out of a growing
-//!   decode buffer (delimiter is a blank line) and [`parse_sse_block`] splits a
-//!   frame into its `event:` name and reassembled `data:` payload;
-//! * **outbound** — [`serialize_event`] renders one Responses SSE event.
-//!
-//! Keeping these as free functions over `&str`/`&Value` means the stream state
-//! machine can be exercised without a live socket.
-//!
-//! This is the bottom layer of the streaming (Phase 2) stack; the codec is
-//! consumed by the envelope + increment state machines and the top-level
-//! orchestrator that land in the following layers, so the functions read as
-//! dead until those wire in. Tests lock in the frame contract now.
 
 use serde_json::Value;
 

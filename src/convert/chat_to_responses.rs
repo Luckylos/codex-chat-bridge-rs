@@ -243,7 +243,6 @@ fn chat_tool_calls_to_response_items(
 /// custom tool → `custom_tool_call`, nested-namespace call → `function_call`
 /// with the action extracted from the arguments, and a plain/namespaced
 /// function → `function_call` (restoring the original name + namespace).
-/// Mirrors the Python `tool_call_to_response_item`.
 fn tool_call_to_response_item(
     call_id: &str,
     name: &str,

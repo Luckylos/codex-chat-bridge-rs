@@ -1,31 +1,5 @@
 //! Tool-call increment state machine for the streaming path.
 //!
-//! Mirrors the Python bridge's `stream_state/tools.py` (plus the supporting
-//! `tool_types` / `tool_items` / `tool_progress` modules). Tracks any number
-//! of parallel tool calls, keyed by their upstream chat `index`, across the
-//! stream:
-//!
-//! * each `tool_calls[]` delta accumulates id / name / arguments;
-//! * the first delta carrying a name or call id lazily emits
-//!   `output_item.added` (an `in_progress` `function_call` /
-//!   `custom_tool_call` / `tool_search_call` item);
-//! * subsequent argument deltas stream out as `function_call_arguments.delta`
-//!   (chunked at 64 bytes) or `custom_tool_call_input.delta`;
-//! * `finalize` closes every open call with its `.done` events plus
-//!   `output_item.done`, and registers the completed items with the envelope.
-//!
-//! Output-index allocation differs from the reasoning / message machines: tool
-//! calls claim a contiguous base so parallel calls preserve their upstream
-//! `index` ordering (`base + index`), rather than allocating one at a time.
-//!
-//! Phase 1 scope: the nested-namespace buffering path (`nested_buffered` /
-//! `try_resolve_nested_buffer` / `degrade_buffered_namespace`) from the Python
-//! bridge is Phase 3; here namespace resolution is the identity mapping, so a
-//! tool call is added as soon as it carries a name or id.
-//!
-//! Driven by the top-level stream orchestrator that lands in a later layer, so
-//! the store reads as dead until it wires in. Tests lock in the event
-//! sequence now.
 
 use std::collections::BTreeMap;
 
@@ -44,10 +18,10 @@ const ARGUMENTS_CHUNK_SIZE: usize = 64;
 
 /// Upper bound on how many bytes of a nested-namespace call's arguments we will
 /// buffer while waiting for the `action` selector to become parseable before
-/// degrading to a namespace-level call. Mirrors `NAMESPACE_BUFFER_MAX_BYTES`.
+/// degrading to a namespace-level call.
 const NAMESPACE_BUFFER_MAX_BYTES: usize = 4096;
 
-/// Per-call accumulation state. Mirrors `tool_types.ToolCallState`.
+/// Per-call accumulation state.
 #[derive(Debug, Default)]
 struct ToolCallState {
     output_index: Option<i64>,
@@ -56,7 +30,7 @@ struct ToolCallState {
     name: String,
     /// Restored namespace for a nested-namespace call, set once its `action`
     /// resolves (or on degradation). Drives the response-side `namespace`
-    /// field. Mirrors `ToolCallState.namespace`.
+    /// field.
     namespace: Option<String>,
     arguments: String,
     added: bool,
@@ -75,7 +49,7 @@ struct ToolCallState {
     nested_resolved: bool,
 }
 
-/// Tool classification. Mirrors `tool_types.ToolKind`.
+/// Tool classification.
 #[derive(Debug, Clone, Copy)]
 struct ToolKind {
     is_custom: bool,
@@ -95,7 +69,6 @@ impl ToolKind {
 }
 
 /// A completed tool item plus the derived strings the finalize path needs.
-/// Mirrors `tool_types.CompletedToolEmission`.
 struct CompletedToolEmission {
     item: Value,
     arguments: String,
@@ -111,7 +84,7 @@ fn resolve_tool_kind(ctx: &BridgeToolContext, name: &str) -> ToolKind {
 }
 
 /// The `ToolSpec` for `name` when it refers to a nested-namespace tool, else
-/// `None`. Mirrors `tool_namespace.nested_namespace_spec`.
+/// `None`.
 fn nested_namespace_spec<'a>(
     ctx: &'a BridgeToolContext,
     name: &str,
@@ -125,8 +98,7 @@ fn nested_namespace_spec<'a>(
 
 /// Try to resolve a buffered nested-namespace call: if the `action` selector is
 /// now parseable, rewrite the state's name/namespace/arguments to the concrete
-/// action and clear the buffering flag. Returns whether it resolved. Mirrors
-/// `tool_namespace.try_resolve_nested_buffer`.
+/// action and clear the buffering flag. Returns whether it resolved.
 fn try_resolve_nested_buffer(ctx: &BridgeToolContext, state: &mut ToolCallState) -> bool {
     let Some(spec) = nested_namespace_spec(ctx, &state.name) else {
         return false;
@@ -144,8 +116,7 @@ fn try_resolve_nested_buffer(ctx: &BridgeToolContext, state: &mut ToolCallState)
 }
 
 /// Degrade a still-unresolved buffered namespace call to a namespace-level call
-/// (keep the namespace name, normalize the arguments). Mirrors
-/// `tool_namespace.degrade_buffered_namespace`.
+/// (keep the namespace name, normalize the arguments).
 fn degrade_buffered_namespace(ctx: &BridgeToolContext, state: &mut ToolCallState) {
     if let Some(spec) = nested_namespace_spec(ctx, &state.name) {
         let resolution = crate::context::resolve_nested_namespace_arguments(spec, &state.arguments);
@@ -158,8 +129,7 @@ fn degrade_buffered_namespace(ctx: &BridgeToolContext, state: &mut ToolCallState
 }
 
 /// At finalize, flush a still-buffered nested call: resolve its action if
-/// possible, otherwise degrade to namespace-level. Mirrors
-/// `tool_namespace.flush_buffered_nested_state`.
+/// possible, otherwise degrade to namespace-level.
 fn flush_buffered_nested_state(ctx: &BridgeToolContext, state: &mut ToolCallState) {
     if !state.nested_buffered || state.added {
         return;
@@ -171,7 +141,7 @@ fn flush_buffered_nested_state(ctx: &BridgeToolContext, state: &mut ToolCallStat
 }
 
 /// Assign a synthetic call id / fallback name and derive the item id from the
-/// call id. Mirrors `tool_items.ensure_tool_identity`.
+/// call id.
 fn ensure_tool_identity(state: &mut ToolCallState, kind: ToolKind) {
     if state.call_id.is_empty() {
         state.call_id = id_gen::synthetic_tool_call_id();
@@ -186,8 +156,7 @@ fn ensure_tool_identity(state: &mut ToolCallState, kind: ToolKind) {
     };
 }
 
-/// Resolve the response-side `(name, namespace)`. Mirrors
-/// `tool_items._response_name_and_namespace`. Phase 1 namespace is identity.
+/// Resolve the response-side `(name, namespace)`.
 fn response_name_and_namespace(
     state: &ToolCallState,
     kind: ToolKind,
@@ -223,8 +192,7 @@ fn with_reasoning_content(state: &ToolCallState, mut item: Value) -> Value {
     item
 }
 
-/// Build the `in_progress` output item for `output_item.added`. Mirrors
-/// `tool_items.build_in_progress_item`.
+/// Build the `in_progress` output item for `output_item.added`.
 fn build_in_progress_item(state: &ToolCallState, kind: ToolKind, ctx: &BridgeToolContext) -> Value {
     let (name, namespace) = response_name_and_namespace(state, kind, ctx);
     let mut map = serde_json::Map::new();
@@ -249,8 +217,7 @@ fn build_in_progress_item(state: &ToolCallState, kind: ToolKind, ctx: &BridgeToo
     with_reasoning_content(state, Value::Object(map))
 }
 
-/// Build the completed output item for `output_item.done`. Mirrors
-/// `tool_items.build_completed_item`.
+/// Build the completed output item for `output_item.done`.
 fn build_completed_item(
     state: &ToolCallState,
     kind: ToolKind,
@@ -318,7 +285,7 @@ fn build_completed_item(
 }
 
 /// Accumulate one `tool_calls[]` delta into `state`. Returns the raw arguments
-/// fragment when present. Mirrors `tool_progress.apply_tool_call_delta`.
+/// fragment when present.
 fn apply_tool_call_delta(
     state: &mut ToolCallState,
     tool_call: &Value,
@@ -356,8 +323,7 @@ fn apply_tool_call_delta(
     None
 }
 
-/// Emit the not-yet-sent tail of `arguments` as chunked delta events. Mirrors
-/// `tool_progress.emit_arguments_incremental`.
+/// Emit the not-yet-sent tail of `arguments` as chunked delta events.
 fn emit_arguments_incremental(state: &mut ToolCallState) -> Vec<Vec<u8>> {
     let full = state.arguments.clone();
     let already = state.emitted_arguments.clone();
@@ -402,7 +368,6 @@ fn char_boundary_end(s: &str, start: usize, max: usize) -> usize {
 }
 
 /// Emit a `custom_tool_call_input.delta` for the newly-decoded input prefix.
-/// Mirrors `tool_progress.emit_custom_input_delta_events`.
 fn emit_custom_input_delta_events(state: &mut ToolCallState) -> Vec<Vec<u8>> {
     let prefix = match context::partial_custom_tool_input_from_chat_arguments(&state.arguments) {
         Some(prefix) => prefix,
@@ -427,8 +392,7 @@ fn emit_custom_input_delta_events(state: &mut ToolCallState) -> Vec<Vec<u8>> {
     )]
 }
 
-/// Streaming store for all tool calls in a turn. Mirrors
-/// `tools.ToolStateStore`.
+/// Streaming store for all tool calls in a turn.
 pub struct ToolStateStore {
     tool_context: BridgeToolContext,
     tool_calls: BTreeMap<i64, ToolCallState>,
@@ -476,8 +440,7 @@ impl ToolStateStore {
     }
 
     /// Claim a stable output index for `state`, `base + index`, so parallel
-    /// tool calls preserve their upstream ordering. Mirrors
-    /// `ToolStateStore._ensure_output_index`.
+    /// tool calls preserve their upstream ordering.
     fn ensure_output_index(&mut self, envelope: &mut ResponseEnvelopeState, index: i64) -> i64 {
         if let Some(existing) = self.tool_calls.get(&index).and_then(|s| s.output_index) {
             return existing;
@@ -494,7 +457,6 @@ impl ToolStateStore {
     }
 
     /// Emit `output_item.added` on the first delta that carries an identity.
-    /// Mirrors `ToolStateStore._ensure_added`.
     fn ensure_added(
         &mut self,
         envelope: &mut ResponseEnvelopeState,
@@ -529,7 +491,6 @@ impl ToolStateStore {
 
     /// Begin buffering a nested-namespace call: claim its output index but hold
     /// back `output_item.added` until the `action` selector is parseable.
-    /// Mirrors `ToolStateStore._maybe_start_nested_buffer`.
     fn maybe_start_nested_buffer(&mut self, envelope: &mut ResponseEnvelopeState, index: i64) {
         let should_buffer = match self.tool_calls.get(&index) {
             Some(state) => {
@@ -551,7 +512,7 @@ impl ToolStateStore {
 
     /// Try to resolve a buffered nested call this delta: if its action is now
     /// parseable, emit the deferred `output_item.added` plus any accumulated
-    /// arguments. Mirrors `ToolStateStore._emit_buffered_nested_events`.
+    /// arguments.
     fn emit_buffered_nested_events(
         &mut self,
         envelope: &mut ResponseEnvelopeState,
@@ -579,9 +540,7 @@ impl ToolStateStore {
     }
 
     /// Accumulate a `tool_calls[]` delta and emit the incremental events it
-    /// produces. Mirrors `ToolStateStore.push_delta`, including the
-    /// nested-namespace buffering path (buffer until `action` resolves, or
-    /// degrade to a namespace-level call once the buffer overflows).
+    /// produces.
     pub fn push_delta(
         &mut self,
         envelope: &mut ResponseEnvelopeState,
@@ -674,9 +633,7 @@ impl ToolStateStore {
                     // canonicalized full arguments differ from what was
                     // streamed and emit one authoritative merged delta before
                     // `.done`, so a client that reassembles from deltas still
-                    // converges on the canonical arguments. Mirrors Python
-                    // `tools.push_delta` (which never updates emitted_arguments
-                    // on this branch).
+                    // converges on the canonical arguments.
                 }
             }
         }
@@ -685,7 +642,7 @@ impl ToolStateStore {
 
     /// Close every open tool call: flush residual arguments/input, emit the
     /// `.done` events + `output_item.done`, and register completed items with
-    /// the envelope. Mirrors `ToolStateStore.finalize`.
+    /// the envelope.
     pub fn finalize(&mut self, envelope: &mut ResponseEnvelopeState) -> Vec<Vec<u8>> {
         if self.finalized {
             return Vec::new();
@@ -706,9 +663,7 @@ impl ToolStateStore {
     ///
     /// Only calls that acquired a name are kept (an index that never resolved
     /// an identity is a partial artifact, not a real call). Arguments are
-    /// sanitized at construction. Mirrors the tool_calls branch of
-    /// `ResponsesStreamState.build_assistant_message`. Phase 1 has no
-    /// chat-name/chat-arguments split, so `name`/`arguments` are used directly.
+    /// sanitized at construction.
     pub fn persisted_tool_calls(&self) -> Vec<Value> {
         self.tool_calls
             .values()
@@ -731,7 +686,6 @@ impl ToolStateStore {
             .collect()
     }
 
-    /// Mirrors `ToolStateStore._finalize_state`.
     fn finalize_state(&mut self, envelope: &mut ResponseEnvelopeState, index: i64) -> Vec<Vec<u8>> {
         let mut events = Vec::new();
         // Flush any still-buffered nested-namespace call: resolve its action if
@@ -886,7 +840,7 @@ mod tests {
         // `function_call_arguments.delta` carrying just the unreplayed tail
         // `"NYC"}` before `.done`. This lets a client reassembling from the
         // normalized-delta stream converge on the canonical value. Then come
-        // arguments.done + output_item.done. Mirrors Python `tools.finalize`.
+        // arguments.done + output_item.done.
         let events = store.finalize(&mut envelope);
         assert_eq!(events.len(), 3);
         let (merged_event, merged) = parse_event(&events[0]);
@@ -1007,8 +961,7 @@ mod tests {
         let mut store = ToolStateStore::new(BridgeToolContext::new());
         let mut envelope = env();
         // Name but no id — identity is established (name is enough), so the
-        // item opens immediately with a synthesized call id. Mirrors the
-        // Python guard `state.call_id or state.name`.
+        // item opens immediately with a synthesized call id.
         let events = store.push_delta(
             &mut envelope,
             &json!({ "index": 0, "function": { "name": "do_thing", "arguments": "{}" } }),

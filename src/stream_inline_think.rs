@@ -1,21 +1,5 @@
 //! Inline-`<think>` three-phase state machine for streaming content deltas.
 //!
-//! Mirrors the Python bridge's `inline_think_sm.py`. A `content` delta stream
-//! may embed a leading `<think>…</think>` block that must be routed to the
-//! reasoning summary rather than emitted as visible text. Three phases:
-//!
-//! * `Detecting` — buffer until we can tell whether the content opens with a
-//!   `<think>` tag (possibly split across chunks);
-//! * `Reasoning` — inside the think block, route to the reasoning machine,
-//!   holding back a trailing run that could still grow into a `</think>` close
-//!   tag split across chunks;
-//! * `Text` — past the think block, emit as plain text.
-//!
-//! The machine borrows the envelope / reasoning / message sub-states by mutable
-//! reference (not the whole orchestrator) so the caller can split-borrow struct
-//! fields without a self-aliasing conflict.
-//!
-//! Driven by the streaming orchestrator; reads as dead until that wires in.
 
 use crate::reasoning::{
     could_be_partial_think_open, find_think_close, match_think_open_at_start,
@@ -32,7 +16,7 @@ enum Phase {
     Text,
 }
 
-/// Three-phase inline-think detector. Mirrors `InlineThinkStateMachine`.
+/// Three-phase inline-think detector.
 pub struct InlineThinkStateMachine {
     phase: Phase,
     buffer: String,
@@ -66,8 +50,7 @@ impl InlineThinkStateMachine {
         self.phase != Phase::Text
     }
 
-    /// Route a content delta through inline-think detection. Mirrors
-    /// `push_content_delta`.
+    /// Route a content delta through inline-think detection.
     pub fn push_content_delta(
         &mut self,
         delta: &str,
@@ -168,8 +151,7 @@ impl InlineThinkStateMachine {
         reasoning.push_delta(envelope, &tail)
     }
 
-    /// Flush buffered content during stream finalization. Mirrors
-    /// `flush_on_finalize`.
+    /// Flush buffered content during stream finalization.
     pub fn flush_on_finalize(
         &mut self,
         envelope: &mut ResponseEnvelopeState,
@@ -195,7 +177,7 @@ impl InlineThinkStateMachine {
     }
 
     /// Force-flush buffered/reasoning content as text when tool calls arrive
-    /// before think detection completes. Mirrors `force_to_text`.
+    /// before think detection completes.
     pub fn force_to_text(
         &mut self,
         envelope: &mut ResponseEnvelopeState,

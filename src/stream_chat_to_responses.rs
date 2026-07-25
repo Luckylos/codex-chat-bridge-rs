@@ -1,20 +1,7 @@
 //! Chat Completions → Responses SSE consumer.
 //!
 //! Drives a [`ResponsesStreamState`] from an upstream Chat Completions stream
-//! (or a fully buffered Chat body), emitting Responses SSE event bytes. Mirrors
-//! the Python bridge's `stream_chat_to_responses`.
-//!
-//! Two entry points share one chunk processor ([`process_chat_chunk`]):
-//!
-//! * [`sse_events_from_buffered_chat`] — a non-streaming upstream response is
-//!   replayed as a single synthetic delta per choice, so the buffered path
-//!   produces byte-identical SSE output to the streamed path.
-//! * [`create_responses_sse_stream`] — a live upstream byte stream is decoded,
-//!   framed, and processed chunk-by-chunk.
-//!
-//! The incremental [`Utf8StreamDecoder`] preserves multibyte characters split
-//! across chunk boundaries and counts U+FFFD replacements so silent stream
-//! corruption is observable via metrics rather than vanishing.
+//! (or a fully buffered Chat body), emitting Responses SSE event bytes.
 
 use async_stream::stream;
 use futures::{Stream, StreamExt};
@@ -40,9 +27,6 @@ fn new_stream_state(
 /// An incremental UTF-8 decoder that holds partial multibyte sequences across
 /// chunk boundaries and replaces invalid bytes with U+FFFD.
 ///
-/// Mirrors Python's `codecs.getincrementaldecoder("utf-8")(errors="replace")`:
-/// a trailing incomplete sequence is buffered until the next chunk (or replaced
-/// on the final flush), while genuinely invalid bytes are replaced immediately.
 #[derive(Default)]
 pub struct Utf8StreamDecoder {
     leftover: Vec<u8>,
@@ -484,8 +468,7 @@ where
 
 /// A captured persistence closure for the streaming path: everything needed to
 /// snapshot the finalized turn into the session store, minus the assistant
-/// message (reconstructed from stream state at finalize time). Mirrors the
-/// Python bridge's `_save_turn` closure over `_persist_turn`.
+/// message (reconstructed from stream state at finalize time).
 pub struct StreamPersist {
     pub response_id: String,
     pub messages: Vec<Value>,

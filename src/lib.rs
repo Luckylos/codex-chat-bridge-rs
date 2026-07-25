@@ -61,8 +61,7 @@ use crate::upstream::Upstream;
 struct AppState {
     upstream: Upstream,
     /// Result of the startup upstream connectivity probe: `Some(true/false)`
-    /// once checked, `None` until then. Mirrors the Python bridge's
-    /// `app.state.health_upstream_reachable`.
+    /// once checked, `None` until then.
     upstream_reachable: AtomicBool,
     upstream_checked: AtomicBool,
     /// Full resolved config, consumed by the middleware stack (inbound auth,
@@ -113,7 +112,7 @@ pub async fn run() {
         concurrency,
     });
 
-    // Startup connectivity probe: non-fatal, mirrors the Python lifespan.
+    // Startup connectivity probe: non-fatal.
     match upstream.list_models().await {
         Ok(models) => {
             state.upstream_reachable.store(true, Ordering::Relaxed);
@@ -183,8 +182,7 @@ fn build_app(state: SharedState) -> Router {
 
 /// Resolve when the process receives SIGTERM (container stop) or SIGINT
 /// (Ctrl-C), so `axum::serve` stops accepting new connections and drains
-/// in-flight requests before exit. Mirrors the Python bridge's uvicorn
-/// graceful-shutdown behavior.
+/// in-flight requests before exit.
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -243,7 +241,7 @@ async fn list_models(
 /// conversion, no reasoning-policy rewrite, no compat mutation, no session
 /// persistence. The bridge only adds transport-level retry (network faults +
 /// 429/5xx) and passes the upstream status code, body, and SSE stream through
-/// unchanged. Mirrors the Python bridge's `relay_chat_completion`.
+/// unchanged.
 async fn chat_completions(
     State(state): State<SharedState>,
     body: axum::body::Bytes,
@@ -383,8 +381,7 @@ async fn create_response(
 /// Streaming `/v1/responses`: emit a `text/event-stream` of Responses SSE
 /// events. When the upstream serves streaming, its byte stream is decoded and
 /// converted incrementally; otherwise the turn is buffered upstream and the
-/// buffered body is rendered as a single burst of SSE events. Mirrors the
-/// Python bridge's `_stream_upstream_streaming` / `_stream_buffer_then_sse`.
+/// buffered body is rendered as a single burst of SSE events.
 async fn create_response_streaming(
     state: SharedState,
     chat_request: crate::types::ChatRequest,

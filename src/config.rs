@@ -45,10 +45,7 @@ pub enum UnsupportedToolPolicy {
 }
 
 /// Process-global unsupported-tool policy, seeded once at startup by
-/// [`init_global_unsupported_tool_policy`]. Mirrors the Python bridge's global
-/// settings singleton: the tool-context builder needs the policy but has no
-/// `AppState` handle, so it reads this instead of threading config through
-/// every call site. Defaults to `Ignore` until initialized.
+/// [`init_global_unsupported_tool_policy`].
 static GLOBAL_UNSUPPORTED_TOOL_POLICY: std::sync::OnceLock<UnsupportedToolPolicy> =
     std::sync::OnceLock::new();
 

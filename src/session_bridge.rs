@@ -1,11 +1,5 @@
 //! Session resolution and persistence for `previous_response_id` continuation.
 //!
-//! Mirrors the Python bridge's `protocol/session_bridge.py`: the glue between
-//! the request pipeline and the [`SessionStore`]. `resolve_session` turns an
-//! inbound `previous_response_id` into the stored message history + merged tool
-//! context + model; `save_session` snapshots a completed turn. A supplied but
-//! unknown/expired id is a 404 (`PreviousResponseNotFound`), not a silent fresh
-//! start, matching the OpenAI Responses contract.
 
 use serde_json::{json, Map, Value};
 
@@ -34,7 +28,7 @@ fn coerce_saved_chat_role(role: Option<&str>) -> String {
 /// Extract an assistant message from an upstream Chat Completions body, for the
 /// non-streaming path's session persistence. Returns `None` when the choice
 /// carries no content, tool calls, refusal, or reasoning — an empty turn is not
-/// worth saving. Mirrors `assistant_message_from_chat_body`.
+/// worth saving.
 pub fn assistant_message_from_chat_body(chat_body: &Value) -> Option<Value> {
     let choice = chat_body
         .get("choices")

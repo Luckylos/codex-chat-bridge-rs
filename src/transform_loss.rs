@@ -8,7 +8,6 @@
 //! [`TransformLossCollector`], which the request handler drains into the
 //! `bridge_transform_loss_total` metric and a warning log.
 //!
-//! Mirrors the Python bridge's `transform_loss.py`.
 
 /// A category of data loss or degradation during Responses→Chat conversion.
 ///

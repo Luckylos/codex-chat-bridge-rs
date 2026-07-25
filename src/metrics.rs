@@ -142,7 +142,7 @@ fn metrics() -> &'static Metrics {
 }
 
 /// Record a completed request: increment the labelled counter and observe its
-/// duration. `method`/`path`/`status` mirror the Python access-log labels.
+/// duration. `method`/`path`/`status` are the access-log labels.
 pub fn record_request_full(method: &str, path: &str, status: u16, duration_ms: f64) {
     let m = metrics();
     m.requests_total
@@ -217,10 +217,9 @@ pub enum PhaseKind {
     Facade,
 }
 
-/// RAII timer that observes an upstream phase duration on drop, mirroring the
-/// Python `finally: ...observe(...)` pattern so the metric is recorded on every
-/// exit path (success, error, or early return). Duration is rounded to whole
-/// milliseconds to match the Python `round((now - start) * 1000)`.
+/// RAII timer that observes an upstream phase duration on drop, so the metric
+/// is recorded on every exit path (success, error, or early return). Duration
+/// is rounded to whole milliseconds.
 pub struct PhaseTimer {
     kind: PhaseKind,
     phase: &'static str,

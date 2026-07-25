@@ -3,8 +3,7 @@
 //! When an OpenAI-compatible upstream rejects a request with a 400 (or a
 //! narrow set of 5xx stream-open failures), the offending field can often be
 //! stripped or clamped and the request retried. This module owns that state
-//! machine. It mirrors the Python bridge's `reasoning_policy.py` +
-//! `upstream_compat.py` pair, collapsed into one Rust module:
+//! machine, exposed as three pieces:
 //!
 //! * [`ReasoningState`] carries the mutable request body plus the reasoning
 //!   wire-mode and the set of compat labels already applied, so no rule can
@@ -16,10 +15,9 @@
 //! * [`next_retry`] inspects an error body + status and returns the next body
 //!   to try (with a label for logging) or `None` when nothing more can help.
 //!
-//! The rules are intentionally the same set, in the same precedence, as the
-//! Python policy; only the plumbing is Rust-idiomatic (owned `Map` mutation
-//! and a `HashSet<&'static str>` of applied labels instead of frozen
-//! dataclasses).
+//! The rules fire in a fixed precedence, with an owned `Map` mutated in place
+//! and a `HashSet<&'static str>` tracking applied labels so no rule can
+//! re-fire and loop.
 
 use std::collections::HashSet;
 
@@ -73,7 +71,7 @@ fn strip_reasoning_fields(body: &mut Map<String, Value>) {
 
 /// Infer the canonical effort already encoded in a raw chat body — either an
 /// explicit `reasoning_effort` string or a `thinking: {type: "disabled"}`
-/// block. Mirrors `infer_canonical_reasoning_effort`.
+/// block.
 fn infer_effort(body: &Map<String, Value>) -> CanonicalEffort {
     let explicit = normalize_canonical_effort(body.get("reasoning_effort").and_then(Value::as_str));
     if explicit != CanonicalEffort::Unspecified {
@@ -130,7 +128,7 @@ fn error_mentions(error: &str, needle: &str) -> bool {
 }
 
 /// A generic single-field compat rule: match on the error body + current body,
-/// then rewrite one field. Mirrors the `_GENERIC_COMPAT_RULES` tuple.
+/// then rewrite one field.
 struct GenericRule {
     label: &'static str,
     matches: fn(&Map<String, Value>, &str) -> bool,
@@ -202,8 +200,8 @@ const GENERIC_RULES: &[GenericRule] = &[
     },
 ];
 
-/// The count of distinct compat labels; the hop cap mirrors the Python
-/// `len(_GENERIC_COMPAT_RULES) + 3`.
+/// The retry hop cap: one hop per generic rule plus a small margin for the
+/// reasoning-mode transitions.
 pub const MAX_COMPAT_HOPS: usize = GENERIC_RULES.len() + 3;
 
 /// Compute the next retry state after an upstream error, or `None` when no

@@ -1,22 +1,5 @@
 //! Reasoning increment state machine for the streaming path.
 //!
-//! Mirrors the Python bridge's `stream_state/reasoning.py`. Tracks a single
-//! reasoning summary block across the stream:
-//!
-//! * the first delta lazily emits `output_item.added` (a `reasoning` item in
-//!   `in_progress`) plus an empty `reasoning_summary_part.added`;
-//! * each subsequent delta accumulates text and emits a
-//!   `reasoning_summary_text.delta`;
-//! * `finalize` closes the block with the text/part `.done` events and an
-//!   `output_item.done`, and registers the completed item with the envelope so
-//!   the terminal response carries it in output order.
-//!
-//! Summary index is always 0 — the bridge collapses reasoning into one summary
-//! block, matching the non-streaming renderer in `convert::chat_to_responses`.
-//!
-//! Driven by the top-level stream orchestrator that lands in a later layer, so
-//! the state machine reads as dead until it wires in. Tests lock in the event
-//! sequence now.
 
 use serde_json::json;
 

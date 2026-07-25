@@ -1,21 +1,5 @@
 //! Bridge tool-context: the request-scoped tool registry.
 //!
-//! Mirrors the Python bridge's `bridge_context` package. A [`BridgeToolContext`]
-//! is built once per request from the declared Responses tools, and owns three
-//! things the rest of the pipeline needs:
-//!
-//! 1. The upstream Chat Completions `tools` array (`chat_tools`), with namespace
-//!    tool names flattened to fit the 64-char Chat function-name limit and nested
-//!    namespace strategies merged into a single action-selector schema.
-//! 2. The forward map `chat_name_for_function` (Responses name+namespace → the
-//!    flattened Chat name) used when translating a Responses `function_call`
-//!    input item into a Chat `tool_calls[]` entry.
-//! 3. The reverse registry `restore_namespace_and_name` / `lookup_chat_name`
-//!    (Chat name → original `(namespace, name)` + [`ToolSpec`]) used when
-//!    translating an upstream Chat `tool_calls[]` back into a Responses item.
-//!
-//! Classification helpers (`is_custom_tool` / `is_tool_search`) let the streaming
-//! tool state machine pick the right Responses item type.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -54,8 +38,7 @@ fn is_hosted_tool_type(tool_type: &str) -> bool {
 ///
 /// The natural join is `namespace__name`. When that exceeds
 /// [`CHAT_TOOL_NAME_MAX_LEN`], it is truncated and disambiguated with a
-/// `__<16-hex-sha256>` suffix so distinct long names never collide. Mirrors the
-/// Python `flatten_namespace_tool_name`.
+/// `__<16-hex-sha256>` suffix so distinct long names never collide.
 pub fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
     let full_name = format!("{namespace}__{name}");
     // Python measures length and slices by Unicode code point, not UTF-8 byte,
@@ -71,7 +54,7 @@ pub fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
 }
 
 /// Extract a tool name from a Responses tool value: a bare string, a flat
-/// `{name}`, or a nested `{function:{name}}`. Mirrors `tool_name_from_value`.
+/// `{name}`, or a nested `{function:{name}}`.
 fn tool_name_from_value(tool: &Value) -> Option<String> {
     if let Some(s) = tool.as_str() {
         let candidate = s.trim();
@@ -94,7 +77,7 @@ fn tool_name_from_value(tool: &Value) -> Option<String> {
 }
 
 // --------------------------------------------------------------------------- //
-// ToolSpec (mirrors bridge_context/models.py)
+// ToolSpec
 // --------------------------------------------------------------------------- //
 
 /// The origin kind of a registered Chat tool. Replaces the former stringly-typed
@@ -108,8 +91,7 @@ pub enum ToolKind {
     Namespace,
 }
 
-/// The schema strategy for a namespace tool. Mirrors the Python namespace
-/// strategy strings; unknown/absent values fall back to `Flat`.
+/// The schema strategy for a namespace tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamespaceStrategy {
     NestedOneof,
@@ -144,7 +126,7 @@ impl NamespaceStrategy {
 }
 
 /// The origin of a registered Chat tool, used to translate upstream tool calls
-/// back into the correct Responses item shape. Mirrors the Python `ToolSpec`.
+/// back into the correct Responses item shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     /// The tool's origin kind.
@@ -191,7 +173,7 @@ impl ToolSpec {
     }
 
     /// True when this is a namespace tool using a nested (action-selector)
-    /// strategy. Mirrors `ToolSpec.is_nested_namespace`.
+    /// strategy.
     pub fn is_nested_namespace(&self) -> bool {
         self.kind == ToolKind::Namespace
             && self
@@ -202,13 +184,12 @@ impl ToolSpec {
 }
 
 // --------------------------------------------------------------------------- //
-// Nested namespace argument resolution (mirrors nested_namespace.py)
+// Nested namespace argument resolution
 // --------------------------------------------------------------------------- //
 
 /// The result of normalizing a nested-namespace tool call's arguments: the
 /// selected action name (when it matched a known action) and the argument JSON
-/// with the `action`/`params` envelope unwrapped. Mirrors the Python
-/// `NestedNamespaceResolution`.
+/// with the `action`/`params` envelope unwrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedNamespaceResolution {
     pub action_name: Option<String>,
@@ -220,8 +201,7 @@ pub struct NestedNamespaceResolution {
 /// The namespace schema encodes the concrete action in an `action` field; for
 /// `nested_anyof` the real arguments live under `params` and are flattened back
 /// out. When the payload is incomplete/malformed or the action is unknown, the
-/// original argument string is preserved. Mirrors
-/// `resolve_nested_namespace_arguments`.
+/// original argument string is preserved.
 pub fn resolve_nested_namespace_arguments(
     spec: &ToolSpec,
     arguments_json: &str,
@@ -265,11 +245,11 @@ pub fn resolve_nested_namespace_arguments(
 }
 
 // --------------------------------------------------------------------------- //
-// BridgeToolContext (mirrors bridge_context/context.py + registry.py)
+// BridgeToolContext
 // --------------------------------------------------------------------------- //
 
 /// Request-scoped tool registry. Owns the upstream `chat_tools` array and the
-/// forward/reverse namespace maps. Mirrors the Python `BridgeToolContext`.
+/// forward/reverse namespace maps.
 #[derive(Debug, Default, Clone)]
 pub struct BridgeToolContext {
     custom_tool_names: BTreeSet<String>,
@@ -356,7 +336,7 @@ impl BridgeToolContext {
     /// Forward map: the Chat function name for a Responses `(name, namespace)`.
     /// A registered namespaced tool uses its (possibly hash-suffixed) flattened
     /// name; an unregistered namespaced name falls back to a fresh flatten; a
-    /// plain name passes through. Mirrors `chat_name_for_function`.
+    /// plain name passes through.
     pub fn chat_name_for_function(&self, name: &str, namespace: Option<&str>) -> String {
         if let Some(ns) = namespace {
             if let Some(chat_name) = self
@@ -373,7 +353,7 @@ impl BridgeToolContext {
     /// Reverse map: recover the original `(namespace, name)` from a Chat
     /// function name. Falls back to splitting on the last `__` only when the
     /// prefix is a registered namespace, so a plain name containing `__` is not
-    /// mis-parsed. Mirrors `restore_namespace_and_name`.
+    /// mis-parsed.
     pub fn restore_namespace_and_name(&self, chat_name: &str) -> (Option<String>, String) {
         if let Some(spec) = self.chat_name_to_spec.get(chat_name) {
             return (spec.namespace.clone(), spec.name.clone());
@@ -389,7 +369,7 @@ impl BridgeToolContext {
     /// Fold another context's registrations into this one. Used to merge a
     /// continuation turn's freshly-declared tools into the stored session
     /// context. Hosted (passthrough) tools are copied verbatim; every other
-    /// tool is re-registered by its spec. Mirrors `merge_tool_context`.
+    /// tool is re-registered by its spec.
     pub fn merge(&mut self, other: &BridgeToolContext) {
         for chat_tool in &other.chat_tools {
             if let Some(tool_type) = chat_tool.get("type").and_then(Value::as_str) {
@@ -417,7 +397,7 @@ impl BridgeToolContext {
     }
 
     /// Register a normalized Chat tool into the registry, deduplicating by Chat
-    /// name. Mirrors `register_chat_tool`.
+    /// name.
     fn register_chat_tool(&mut self, chat_name: &str, spec: ToolSpec, chat_tool: Value) {
         if chat_name.trim().is_empty() || self.seen_chat_names.contains(chat_name) {
             return;
@@ -438,7 +418,7 @@ impl BridgeToolContext {
     }
 
     /// Register a Responses function tool (flat or nested `function`), applying
-    /// namespace flattening. Mirrors `add_function_tool`.
+    /// namespace flattening.
     fn add_function_tool(&mut self, tool: &Value, namespace: Option<&str>) {
         let function = tool
             .get("function")
@@ -472,8 +452,7 @@ impl BridgeToolContext {
         self.register_chat_tool(&chat_name, spec, chat_tool);
     }
 
-    /// Register a custom tool as a single-`input`-string Chat function. Mirrors
-    /// `add_custom_tool` + `build_custom_chat_tool`.
+    /// Register a custom tool as a single-`input`-string Chat function.
     fn add_custom_tool(&mut self, tool: &Value) {
         let Some(name) = tool_name_from_value(tool) else {
             return;
@@ -503,8 +482,7 @@ impl BridgeToolContext {
         self.register_chat_tool(&name, ToolSpec::custom(name.clone()), chat_tool);
     }
 
-    /// Register the synthetic tool-search proxy function. Mirrors
-    /// `add_tool_search_tool` + `build_tool_search_chat_tool`.
+    /// Register the synthetic tool-search proxy function.
     fn add_tool_search_tool(&mut self) {
         let chat_tool = json!({
             "type": "function",
@@ -531,8 +509,7 @@ impl BridgeToolContext {
     }
 
     /// Register a namespace tool, flattening children (flat strategy) or merging
-    /// them into a single action-selector schema (nested strategies). Mirrors
-    /// `add_namespace_tool`.
+    /// them into a single action-selector schema (nested strategies).
     fn add_namespace_tool(&mut self, namespace_tool: &Value) {
         let namespace = namespace_tool.get("name").and_then(Value::as_str);
         let children = namespace_tool
@@ -572,7 +549,6 @@ impl BridgeToolContext {
     }
 
     /// Build and register a single merged Chat tool for a nested namespace.
-    /// Mirrors `_add_nested_namespace_tool` + `build_nested_namespace_chat_tool`.
     fn add_nested_namespace_tool(
         &mut self,
         namespace: &str,
@@ -611,7 +587,7 @@ impl BridgeToolContext {
     }
 
     /// Register a single Responses tool by type, applying the hosted-tool
-    /// policy. Mirrors `add_response_tool` + `apply_hosted_tool_policy`.
+    /// policy.
     fn add_response_tool(&mut self, tool: &Value, policy: UnsupportedToolPolicy) {
         // A bare string is shorthand for a custom tool by name.
         if let Some(name) = tool.as_str() {
@@ -662,8 +638,7 @@ impl BridgeToolContext {
     }
 }
 
-/// Extract valid function children and their action names, in order. Mirrors
-/// `_collect_function_children`.
+/// Extract valid function children and their action names, in order.
 fn collect_function_children(children: &[Value]) -> (Vec<Value>, Vec<String>) {
     let mut sub_tools = Vec::new();
     let mut action_names = Vec::new();
@@ -686,7 +661,6 @@ fn collect_function_children(children: &[Value]) -> (Vec<Value>, Vec<String>) {
 }
 
 /// `nested_oneof`: one variant per action, discriminated by an `action` enum.
-/// Mirrors `_build_oneof_schema`.
 fn build_oneof_schema(sub_tools: &[Value]) -> Value {
     let mut variants = Vec::new();
     for func in sub_tools {
@@ -721,8 +695,7 @@ fn build_oneof_schema(sub_tools: &[Value]) -> Value {
     json!({ "type": "object", "oneOf": variants })
 }
 
-/// `nested_anyof`: a single `action` enum plus a merged `params` anyOf. Mirrors
-/// `_build_anyof_schema`.
+/// `nested_anyof`: a single `action` enum plus a merged `params` anyOf.
 fn build_anyof_schema(sub_tools: &[Value], action_names: &[String]) -> Value {
     let param_variants: Vec<Value> = sub_tools
         .iter()
@@ -749,13 +722,13 @@ fn build_anyof_schema(sub_tools: &[Value], action_names: &[String]) -> Value {
 }
 
 // --------------------------------------------------------------------------- //
-// Request-side tool-context builder (mirrors builder.py)
+// Request-side tool-context builder
 // --------------------------------------------------------------------------- //
 
 /// Build a [`BridgeToolContext`] from a Responses request: register each declared
 /// tool (flattening namespaces, building the Chat `tools` array), then scan the
 /// request input for `custom_tool_call` names and `tool_search_output` tool
-/// lists. Mirrors `build_tool_context_from_request`.
+/// lists.
 pub fn build_tool_context_from_request(
     payload: &crate::types::ResponsesRequest,
 ) -> BridgeToolContext {
@@ -787,7 +760,7 @@ pub fn build_tool_context_from_request(
 }
 
 /// Normalize a request `input` into a flat list of items, wrapping bare strings
-/// as `input_text` parts. Mirrors `iter_request_input_items`.
+/// as `input_text` parts.
 fn iter_request_input_items(input: Option<&Value>) -> Vec<Value> {
     match input {
         None | Some(Value::Null) => Vec::new(),
@@ -804,8 +777,7 @@ fn iter_request_input_items(input: Option<&Value>) -> Vec<Value> {
 }
 
 /// Register tools carried inside `tool_search_output` items (recursing into
-/// arrays but not into the output payload itself). Mirrors
-/// `collect_tool_search_output_tools`.
+/// arrays but not into the output payload itself).
 fn collect_tool_search_output_tools(
     context: &mut BridgeToolContext,
     value: &Value,
@@ -831,16 +803,11 @@ fn collect_tool_search_output_tools(
 }
 
 // --------------------------------------------------------------------------- //
-// Custom-tool input helpers (mirror bridge_context/custom_tools.py)
+// Custom-tool input helpers
 // --------------------------------------------------------------------------- //
 
 /// Extract the *fully parsed* custom-tool input from a chat arguments JSON
-/// string. Mirrors `custom_tool_input_from_chat_arguments`.
-///
-/// * blank input → empty string;
-/// * arguments that parse to an object with a string `input` field → that
-///   string;
-/// * anything else → the original arguments string verbatim.
+/// string.
 pub fn custom_tool_input_from_chat_arguments(arguments: &str) -> String {
     if arguments.trim().is_empty() {
         return String::new();
@@ -855,11 +822,6 @@ pub fn custom_tool_input_from_chat_arguments(arguments: &str) -> String {
 }
 
 /// Parse a chat arguments string into an object for a `tool_search_call`.
-/// Mirrors `parse_tool_arguments_object`.
-///
-/// * blank → empty object;
-/// * parseable object → that object;
-/// * anything else → `{ "query": <arguments> }`.
 pub fn parse_tool_arguments_object(arguments: &str) -> Value {
     if arguments.trim().is_empty() {
         return Value::Object(Map::new());
@@ -871,13 +833,7 @@ pub fn parse_tool_arguments_object(arguments: &str) -> Value {
 }
 
 /// Extract a *partial* custom-tool input prefix from an in-flight (possibly
-/// incomplete) chat arguments string. Mirrors
-/// `partial_custom_tool_input_from_chat_arguments`.
-///
-/// Locates the `"input"` key, walks to the opening quote of its string value,
-/// then decodes the JSON string body up to the point where it either ends,
-/// hits a closing quote, or reaches a truncation. Returns `None` when the key
-/// or a string value has not arrived yet.
+/// incomplete) chat arguments string.
 pub fn partial_custom_tool_input_from_chat_arguments(arguments: &str) -> Option<String> {
     if arguments.trim().is_empty() {
         return None;
@@ -900,8 +856,7 @@ pub fn partial_custom_tool_input_from_chat_arguments(arguments: &str) -> Option<
 }
 
 /// Decode a JSON string body (everything after the opening quote) up to the
-/// first unescaped closing quote or a truncation point. Mirrors the Python
-/// `_partial_json_string_prefix`.
+/// first unescaped closing quote or a truncation point.
 fn partial_json_string_prefix(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut result = String::new();

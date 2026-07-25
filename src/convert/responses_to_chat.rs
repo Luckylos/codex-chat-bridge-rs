@@ -83,8 +83,7 @@ pub fn responses_to_chat(payload: &ResponsesRequest, resolved_model: &str) -> Ch
 /// Convert an inbound Responses request into an upstream Chat request, prefixing
 /// the message list with `existing_messages` restored from a prior turn
 /// (`previous_response_id` continuation). The stored history leads, then this
-/// turn's instructions system message, then this turn's input items. Mirrors
-/// the Python bridge's `responses_to_chat_request` + `_initial_messages`.
+/// turn's instructions system message, then this turn's input items.
 pub fn responses_to_chat_with_session(
     payload: &ResponsesRequest,
     resolved_model: &str,
@@ -204,8 +203,7 @@ fn append_input_items(
     let mut pending_tool_calls: Vec<Value> = Vec::new();
     let mut pending_reasoning: Option<String> = None;
     // Call ids already present in the (possibly session-restored) history, so a
-    // continuation turn skips tool calls/outputs it already carries. Mirrors
-    // the Python bridge's `existing_call_ids`.
+    // continuation turn skips tool calls/outputs it already carries.
     let skip_call_ids = existing_call_ids(messages);
 
     macro_rules! flush {
@@ -353,8 +351,7 @@ fn append_input_items(
     flush_pending(messages, &mut pending_tool_calls, &mut pending_reasoning);
 }
 /// Collect call ids already present in `messages`, from both assistant
-/// `tool_calls[].id`/`call_id` and tool-role `tool_call_id`. Mirrors the Python
-/// `existing_call_ids`.
+/// `tool_calls[].id`/`call_id` and tool-role `tool_call_id`.
 fn existing_call_ids(messages: &[Value]) -> std::collections::HashSet<String> {
     let mut ids = std::collections::HashSet::new();
     for msg in messages {
@@ -381,7 +378,6 @@ fn existing_call_ids(messages: &[Value]) -> std::collections::HashSet<String> {
     ids
 }
 /// Whether an item's `call_id`/`id` was already seen in the session history.
-/// Mirrors the Python `should_skip`.
 fn should_skip(obj: &Map<String, Value>, skip_ids: &std::collections::HashSet<String>) -> bool {
     obj.get("call_id")
         .and_then(Value::as_str)
@@ -389,8 +385,7 @@ fn should_skip(obj: &Map<String, Value>, skip_ids: &std::collections::HashSet<St
         .is_some_and(|id| skip_ids.contains(id))
 }
 /// Whether `call_id` has a matching assistant `tool_calls[].id` in the flushed
-/// message history. Mirrors the Python `has_matching_call` (the pending buffer
-/// is always flushed into `messages` before this is called).
+/// message history.
 fn has_matching_call(call_id: &str, messages: &[Value]) -> bool {
     messages.iter().any(|msg| {
         msg.get("role").and_then(Value::as_str) == Some("assistant")
@@ -404,8 +399,7 @@ fn has_matching_call(call_id: &str, messages: &[Value]) -> bool {
     })
 }
 /// Convert a top-level media item and push the resulting user message, or record
-/// a transform-loss event when the URL/format is rejected. Mirrors the Python
-/// `handle_media_item`.
+/// a transform-loss event when the URL/format is rejected.
 fn handle_media_item(
     obj: &Map<String, Value>,
     item_type: &str,
@@ -434,8 +428,7 @@ fn handle_media_item(
     }
 }
 /// Drain a collector into the `bridge_transform_loss_total` metric and a single
-/// warning log summarizing the events. Mirrors the Python request handler's
-/// post-conversion loss reporting.
+/// warning log summarizing the events.
 fn drain_transform_loss(loss: &TransformLossCollector) {
     if loss.is_empty() {
         return;
@@ -500,7 +493,7 @@ fn handle_tool_call_item(
         ToolCallKind::Function => {
             // A namespaced function call is flattened back to the Chat name the
             // upstream saw, so a continuation turn's tool_calls[].name matches
-            // the tool schema. Mirrors `chat_name_for_function`.
+            // the tool schema.
             let raw_name = obj
                 .get("name")
                 .and_then(Value::as_str)
@@ -606,8 +599,7 @@ fn is_openai_o_series(model: &str) -> bool {
 }
 /// Convert a Responses `tool_choice` into the Chat Completions form. String
 /// modes (`auto`/`none`/`required`) pass through; an explicit tool object is
-/// rewritten to `{type:function, function:{name}}`. Mirrors the Python
-/// `_responses_tool_choice_to_chat`.
+/// rewritten to `{type:function, function:{name}}`.
 fn responses_tool_choice_to_chat(
     tool_choice: &Value,
     tool_context: &crate::context::BridgeToolContext,
@@ -627,8 +619,7 @@ fn responses_tool_choice_to_chat(
             {
                 Some(name) => {
                     // A namespaced tool_choice is flattened to the Chat name the
-                    // upstream schema declares. Mirrors the Python
-                    // `_responses_tool_choice_to_chat`.
+                    // upstream schema declares.
                     let namespace = obj.get("namespace").and_then(Value::as_str);
                     let chat_name = tool_context.chat_name_for_function(name, namespace);
                     json!({ "type": "function", "function": { "name": chat_name } })

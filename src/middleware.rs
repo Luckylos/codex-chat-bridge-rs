@@ -77,9 +77,8 @@ impl Drop for RequestMetricsGuard {
         let duration_ms = self.start.elapsed().as_secs_f64() * 1000.0;
         metrics::record_request_full(&self.method, &self.path, self.status, duration_ms);
         metrics::dec_in_flight();
-        // Per-request access log, mirroring the Python bridge's JSON line
-        // (request_id / method / path / status / duration_ms) so operators keep
-        // the same observability after the Rust cutover.
+        // Per-request access log as a structured JSON line
+        // (request_id / method / path / status / duration_ms).
         tracing::info!(
             request_id = %self.request_id,
             method = %self.method,

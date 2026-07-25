@@ -3,8 +3,8 @@
 //! Strong types for the request/response *envelopes* the bridge owns; the
 //! polymorphic interior (input items, content parts, tool definitions) stays as
 //! `serde_json::Value` because the Responses protocol has too many tagged-union
-//! shapes for exhaustive structs to pay off — this mirrors the Python bridge's
-//! TypedDict-at-the-edges / dict-in-the-middle split.
+//! shapes for exhaustive structs to pay off — strong types at the edges, plain
+//! JSON in the middle.
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -62,8 +62,6 @@ pub struct ResponsesRequest {
 
 impl ResponsesRequest {
     /// Re-serialize the original request into a plain map for request-echo.
-    /// Mirrors Python's `model_dump(exclude_none=True, exclude_defaults=True)`
-    /// closely enough for the echo fields, which are all explicitly named.
     pub fn to_echo_map(&self) -> Map<String, Value> {
         let mut map = Map::new();
         if let Some(v) = &self.instructions {

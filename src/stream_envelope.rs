@@ -1,19 +1,5 @@
 //! Response-envelope state for the streaming (Phase 2) SSE path.
 //!
-//! Mirrors the Python bridge's `stream_state/envelope.py`. The envelope owns
-//! the lifecycle events that wrap every streamed turn — `response.created`,
-//! `response.in_progress`, and the terminal `response.completed` /
-//! `response.failed` — plus the shared response object those events carry
-//! (id, model, usage, request-echo fields) and the output-index allocator the
-//! increment state machines draw from.
-//!
-//! It sits directly above the SSE codec: it builds `Value` response objects and
-//! renders them through [`crate::sse::serialize_event`]. The reasoning / message
-//! / tool increment machines (next layers) call into it to allocate indices and
-//! append completed output items; the top-level orchestrator drives
-//! `ensure_started` / `finalize`. Until those land the envelope reads as dead,
-//! so the module carries `allow(dead_code)`; the tests lock in the event
-//! contract now.
 
 use serde_json::{json, Map, Value};
 
@@ -25,7 +11,7 @@ use crate::id_gen;
 use crate::sse::serialize_event;
 
 /// Wrap a response object in the `{type, response}` envelope and render it as a
-/// single SSE event. Mirrors `tool_events.response_event`.
+/// single SSE event.
 pub(crate) fn response_event(event_name: &str, response: &Value) -> Vec<u8> {
     let payload = json!({ "type": event_name, "response": response });
     serialize_event(Some(event_name), &payload)

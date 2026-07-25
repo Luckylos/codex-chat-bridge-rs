@@ -1,15 +1,5 @@
 //! Reasoning-content cache for session continuation.
 //!
-//! Mirrors the Python bridge's `protocol/reasoning_cache.py`. Some upstreams
-//! omit `reasoning_content` on assistant messages that carry tool calls when
-//! those messages are replayed on a continuation turn. To keep the reasoning
-//! attached across turns, a `tool_call_id → reasoning_content` map is extracted
-//! when a turn is saved and re-applied to any assistant message that is missing
-//! its reasoning on the next turn.
-//!
-//! Messages are the bridge's `serde_json::Value` chat-message shape rather than
-//! a strong struct, so the helpers reach into `role` / `tool_calls` /
-//! `reasoning_content` fields directly.
 
 use std::collections::BTreeMap;
 

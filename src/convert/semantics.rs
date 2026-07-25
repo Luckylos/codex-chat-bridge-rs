@@ -72,17 +72,15 @@ pub(crate) fn incomplete_reason_from_finish_reason(finish_reason: Option<&str>) 
 }
 /// Whether a finalized response status is safe to persist for
 /// `previous_response_id` continuation. `None` (never finalized) is not
-/// persistable. Mirrors `should_persist_response_status`.
+/// persistable.
 pub(crate) fn should_persist_response_status(status: Option<ResponseStatus>) -> bool {
     status.is_some_and(ResponseStatus::is_persistable)
 }
 /// Whether a Chat `finish_reason` maps to a persistable terminal state.
-/// Mirrors `should_persist_finish_reason`.
 pub(crate) fn should_persist_finish_reason(finish_reason: Option<&str>) -> bool {
     response_status_from_finish_reason(finish_reason).is_persistable()
 }
 /// Extract the first-choice `finish_reason` from a Chat Completions body.
-/// Mirrors `chat_finish_reason`.
 pub(crate) fn chat_finish_reason(chat_body: &Value) -> Option<String> {
     chat_body
         .get("choices")
