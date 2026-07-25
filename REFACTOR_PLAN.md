@@ -113,31 +113,46 @@ benches/            # criterion micro-benches on the hot transform path (new)
 - `Display`/`AsRef<str>`; ban raw `format!("fc_{}")` scattering.
 - Wire output identical (same rendered strings) → oracle proves it.
 
-### Phase 2 — Interior protocol enums (domain/protocol.rs) — the big one
-- Replace the 16 stringly-typed `get("type").as_str()` dispatch sites with
-  `#[derive(Deserialize)] #[serde(tag = "type")]` enums:
-  `InputItem`, `ContentPart`, `ResponseOutputItem`, `ToolDef`.
-- **CORRECTION on lossless-ness (this is the crux — the naive plan loses data):**
-  `#[serde(other)]` only works on **unit variants** — it CANNOT capture the
-  payload, so it is NOT a lossless fallback. Two rules make this safe:
-  1. Recognized variants that must passthrough unknown sibling keys carry
-     `#[serde(flatten)] extra: Map<String,Value>` (the pattern already proven on
-     `ResponsesRequest`), so re-serialization preserves every field.
-  2. **Unrecognized items bypass the enum entirely** — the decode target is
-     `enum Item { Known(TypedVariant), Unknown(Value) }` via
-     `#[serde(untagged)]`, where the `Unknown(Value)` arm holds the original
-     `Value` and is re-emitted verbatim. An item we don't model must never go
-     through a typed decode→encode cycle, or its bytes/order can drift.
-  - Losslessness becomes a **proptest**: `parse(x).reserialize() == x` (as
-    Value-equality) for arbitrary protocol-shaped JSON, including unknown types.
-- Dispatch (`append_input_items`, `tool_call_to_response_item`, …) becomes
-  exhaustive `match`. These stay "dispatchers" (branch = variant) but now the
-  compiler guarantees totality — the *good* kind of dispatcher.
-- This is where most of the "typo-can't-compile" safety is won. Highest risk of
-  behavioral drift → lean hardest on the oracle + the round-trip proptests.
-- **Scope discipline**: only enum-ize the interior shapes actually *dispatched
-  on* (the 16 sites). Do not model fields the bridge merely passes through — those
-  stay `Value`. Type-safety where we branch, passthrough where we don't.
+### Phase 2 — Interior protocol enums (protocol.rs) — the big one
+- Replace the stringly-typed `get("type").as_str()` dispatch sites with typed
+  discriminants so every dispatch is an exhaustive `match` (a typo can't
+  compile; a new protocol variant forces a decision at each site).
+- **DESIGN OVERRIDE (supersedes the earlier `#[serde(tag)]` prescription):**
+  use **classifier enums**, NOT `#[serde(tag="type")]` full-deserialize enums.
+  Evidence that classifier is strictly better here:
+  1. Input items are **consumed** (→ Chat messages), never re-emitted. The
+     "lossless round-trip" concern only ever applied to the top-level
+     `ResponsesRequest` (already handled via `#[serde(flatten)] extra`). There
+     is no round-trip on interior items, so untagged-`Unknown(Value)` +
+     round-trip proptests solve a problem these sites don't have.
+  2. serde `from_value` is **stricter** than the current lenient reads
+     (`get("text").as_str().unwrap_or("")` yields `""` on a number; a
+     `text: String` field would error the whole item → behavior drift). To
+     stay byte-exact the fields would have to be `Option<Value>`, which
+     reintroduces the exact dynamic reads we're removing — net churn, no gain.
+  3. The codebase already established the right pattern: `ResponseStatus` is a
+     classifier enum (`from_finish_reason → enum → exhaustive match`) with the
+     payload left as `Value`. That wins typo-can't-compile + exhaustive
+     dispatch with **zero** behavior-drift risk. Phase 2 extends that house
+     style; it does not invent a new serde-modeling layer.
+- Concrete deliverables (`protocol.rs`):
+  * `InputItemType` — the 7-way input-item dispatcher in `append_input_items`
+    (folding in `handle_tool_call_item`); the big one. Exhaustive `match`,
+    `Other` keeps the raw tag string for the transform-loss metric.
+  * `ContentPartType` — centralizes the `matches!(typ,
+    "input_text"|"output_text"|"text")` literal duplicated across 3+
+    content-extraction sites (DRY + typo-safety).
+- **Scope discipline (honest exclusions):**
+  * `output_text_from_parts` filter and the `.all(type=="text")` predicate are
+    checks on parts the bridge **itself just built** (self-constructed data),
+    not external-type dispatch → left as-is.
+  * `responses_tool_choice_to_chat` and the `role` match in
+    `build_generic_message` are already clean total matches with an
+    *intended* passthrough/downgrade catch-all; enum-izing buys no
+    "decision-forced" safety and only adds indirection → left as-is.
+  * Payload field reads stay on `Value` (lenient, byte-exact) — type-safety
+    where we branch, passthrough where we don't.
+- Highest risk of behavioral drift → lean hardest on the oracle after each site.
 
 ### Phase 3 — Split convert.rs by direction
 - `responses_to_chat/` (23 fns) + `chat_to_responses/` (7 fns) as sibling

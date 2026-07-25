@@ -21,6 +21,7 @@ mod parity_golden;
 mod parity_stream_golden;
 #[cfg(test)]
 mod proptests;
+mod protocol;
 mod reasoning;
 mod reasoning_cache;
 mod sanitize;

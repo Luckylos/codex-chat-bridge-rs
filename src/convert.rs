@@ -15,6 +15,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::id_gen;
+use crate::protocol::{ContentPartType, InputItemKind, ToolCallKind};
 use crate::reasoning;
 use crate::sanitize::sanitize_string;
 use crate::transform_loss::{TransformLoss, TransformLossCollector};
@@ -268,112 +269,123 @@ fn append_input_items(
         };
         let item_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
 
-        // Reasoning items.
-        if item_type == "reasoning" {
-            let text = reasoning_item_text(obj);
-            let text = text.trim();
-            if text.is_empty() {
-                loss.record(
-                    TransformLoss::DroppedEmptyReasoning,
-                    non_empty(item_type),
-                    "Reasoning item produced empty text after extraction and stripping",
-                );
-                continue;
+        // Classify the item's `type` tag into a closed set so this dispatch is
+        // exhaustive (a typo can't compile; a new protocol variant forces a
+        // decision here). The payload stays `Value` — the reads below are the
+        // same lenient, byte-exact accesses as before.
+        match InputItemKind::classify(item_type) {
+            // Reasoning items.
+            InputItemKind::Reasoning => {
+                let text = reasoning_item_text(obj);
+                let text = text.trim();
+                if text.is_empty() {
+                    loss.record(
+                        TransformLoss::DroppedEmptyReasoning,
+                        non_empty(item_type),
+                        "Reasoning item produced empty text after extraction and stripping",
+                    );
+                    continue;
+                }
+                if pending_tool_calls.is_empty()
+                    && append_reasoning_to_last_assistant(messages, text)
+                {
+                    // backfilled onto the preceding assistant turn
+                } else {
+                    pending_reasoning = Some(match pending_reasoning.take() {
+                        Some(prev) => format!("{prev}\n\n{text}"),
+                        None => text.to_owned(),
+                    });
+                }
             }
-            if pending_tool_calls.is_empty() && append_reasoning_to_last_assistant(messages, text) {
-                // backfilled onto the preceding assistant turn
-            } else {
-                pending_reasoning = Some(match pending_reasoning.take() {
-                    Some(prev) => format!("{prev}\n\n{text}"),
-                    None => text.to_owned(),
-                });
-            }
-            continue;
-        }
 
-        // Text-like content → user message.
-        if matches!(
-            item_type,
-            "input_text" | "output_text" | "text" | "latest_reminder"
-        ) {
-            flush!();
-            let text = obj.get("text").and_then(Value::as_str).unwrap_or("");
-            messages.push(ChatMessageBuilder::with_content("user", json!(text)).into_value());
-            continue;
-        }
-
-        // Media items (input_image / input_audio) → user message content part.
-        if matches!(item_type, "input_image" | "input_audio") {
-            flush!();
-            handle_media_item(obj, item_type, messages, loss);
-            continue;
-        }
-
-        // Tool call items → accumulate.
-        if handle_tool_call_item(
-            obj,
-            item_type,
-            &mut pending_tool_calls,
-            &mut pending_reasoning,
-            &skip_call_ids,
-            loss,
-            tool_context,
-        ) {
-            continue;
-        }
-
-        // Tool output items → tool message (or orphan downgrade to user).
-        if matches!(
-            item_type,
-            "function_call_output" | "custom_tool_call_output" | "tool_search_output"
-        ) {
-            let call_id = resolve_tool_call_id(obj);
-            if should_skip(obj, &skip_call_ids) {
-                loss.record(
-                    TransformLoss::SkippedDuplicateToolCall,
-                    non_empty(item_type),
-                    "Duplicate tool output already in message history",
-                );
-                continue;
-            }
-            flush!();
-            let content = if item_type == "function_call_output" {
-                normalize_tool_output_content(obj.get("output"))
-            } else {
-                serde_json::to_string(obj).unwrap_or_else(|_| "{}".to_owned())
-            };
-            if has_matching_call(&call_id, messages) {
-                let mut m = ChatMessageBuilder::with_content("tool", json!(content));
-                m.tool_call_id = Some(call_id);
-                messages.push(m.into_value());
-            } else {
-                // A tool message with no preceding assistant tool_call would be
-                // rejected by Chat Completions; downgrade to a user message.
-                loss.record(
-                    TransformLoss::DowngradedOrphanToolOutput,
-                    non_empty(item_type),
-                    format!("Tool output {call_id} has no matching preceding tool call"),
-                );
-                let text = format!("Function call output ({call_id}): {content}");
+            // Text-like content → user message.
+            InputItemKind::Text => {
+                flush!();
+                let text = obj.get("text").and_then(Value::as_str).unwrap_or("");
                 messages.push(ChatMessageBuilder::with_content("user", json!(text)).into_value());
             }
-            continue;
-        }
 
-        // Generic role/content message.
-        if obj.contains_key("role") || obj.contains_key("content") || item_type == "message" {
-            flush!();
-            messages.push(build_generic_message(obj, item_type, loss));
-            continue;
-        }
+            // Media items (input_image / input_audio) → user message content part.
+            InputItemKind::Image | InputItemKind::Audio => {
+                flush!();
+                handle_media_item(obj, item_type, messages, loss);
+            }
 
-        // Unknown → skip permissively.
-        flush!();
-        loss.record(
-            TransformLoss::SkippedUnknownItemType,
-            non_empty(item_type),
-            format!("Unrecognized input item type: {item_type:?}"),
-        );
+            // Tool call items → accumulate.
+            InputItemKind::FunctionCall
+            | InputItemKind::CustomToolCall
+            | InputItemKind::ToolSearchCall => {
+                let kind = InputItemKind::classify(item_type)
+                    .as_tool_call()
+                    .expect("tool-call kinds map to a ToolCallKind");
+                handle_tool_call_item(
+                    obj,
+                    kind,
+                    &mut pending_tool_calls,
+                    &mut pending_reasoning,
+                    &skip_call_ids,
+                    loss,
+                    tool_context,
+                );
+            }
+
+            // Tool output items → tool message (or orphan downgrade to user).
+            InputItemKind::FunctionCallOutput
+            | InputItemKind::CustomToolCallOutput
+            | InputItemKind::ToolSearchOutput => {
+                let call_id = resolve_tool_call_id(obj);
+                if should_skip(obj, &skip_call_ids) {
+                    loss.record(
+                        TransformLoss::SkippedDuplicateToolCall,
+                        non_empty(item_type),
+                        "Duplicate tool output already in message history",
+                    );
+                    continue;
+                }
+                flush!();
+                let content = if item_type == "function_call_output" {
+                    normalize_tool_output_content(obj.get("output"))
+                } else {
+                    serde_json::to_string(obj).unwrap_or_else(|_| "{}".to_owned())
+                };
+                if has_matching_call(&call_id, messages) {
+                    let mut m = ChatMessageBuilder::with_content("tool", json!(content));
+                    m.tool_call_id = Some(call_id);
+                    messages.push(m.into_value());
+                } else {
+                    // A tool message with no preceding assistant tool_call would
+                    // be rejected by Chat Completions; downgrade to a user
+                    // message.
+                    loss.record(
+                        TransformLoss::DowngradedOrphanToolOutput,
+                        non_empty(item_type),
+                        format!("Tool output {call_id} has no matching preceding tool call"),
+                    );
+                    let text = format!("Function call output ({call_id}): {content}");
+                    messages
+                        .push(ChatMessageBuilder::with_content("user", json!(text)).into_value());
+                }
+            }
+
+            // Explicit `message` items, plus any unrecognized item that still
+            // carries a role/content payload, become a generic message. An
+            // unrecognized item with neither is skipped permissively. This
+            // preserves the pre-refactor fallthrough exactly.
+            InputItemKind::Message | InputItemKind::Other => {
+                if item_type == "message" || obj.contains_key("role") || obj.contains_key("content")
+                {
+                    flush!();
+                    messages.push(build_generic_message(obj, item_type, loss));
+                } else {
+                    flush!();
+                    loss.record(
+                        TransformLoss::SkippedUnknownItemType,
+                        non_empty(item_type),
+                        format!("Unrecognized input item type: {item_type:?}"),
+                    );
+                }
+            }
+        }
     }
 
     flush_pending(messages, &mut pending_tool_calls, &mut pending_reasoning);
@@ -528,15 +540,15 @@ fn flush_pending(
 
 fn handle_tool_call_item(
     obj: &Map<String, Value>,
-    item_type: &str,
+    kind: ToolCallKind,
     pending_tool_calls: &mut Vec<Value>,
     pending_reasoning: &mut Option<String>,
     skip_call_ids: &std::collections::HashSet<String>,
     loss: &mut TransformLossCollector,
     tool_context: &crate::context::BridgeToolContext,
-) -> bool {
-    let (name, arguments): (String, String) = match item_type {
-        "function_call" => {
+) {
+    let (name, arguments): (String, String) = match kind {
+        ToolCallKind::Function => {
             // A namespaced function call is flattened back to the Chat name the
             // upstream saw, so a continuation turn's tool_calls[].name matches
             // the tool schema. Mirrors `chat_name_for_function`.
@@ -550,7 +562,7 @@ fn handle_tool_call_item(
                 canonicalize_tool_arguments(obj.get("arguments")),
             )
         }
-        "custom_tool_call" => (
+        ToolCallKind::Custom => (
             obj.get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown_tool")
@@ -558,22 +570,21 @@ fn handle_tool_call_item(
             // custom tool input → chat arguments (string passthrough in Phase 1).
             custom_tool_input_to_chat_arguments(obj.get("input")),
         ),
-        "tool_search_call" => (
+        ToolCallKind::Search => (
             crate::context::TOOL_SEARCH_PROXY_NAME.to_owned(),
             canonicalize_tool_arguments(obj.get("arguments")),
         ),
-        _ => return false,
     };
 
     // A tool call whose id already appears in the session history is a
-    // continuation duplicate; skip it (recognized, so return true).
+    // continuation duplicate; skip it.
     if should_skip(obj, skip_call_ids) {
         loss.record(
             TransformLoss::SkippedDuplicateToolCall,
-            non_empty(item_type),
+            non_empty(kind.as_str()),
             "Duplicate tool call already in message history",
         );
-        return true;
+        return;
     }
 
     if let Some(rc) = obj.get("reasoning_content").and_then(Value::as_str) {
@@ -589,7 +600,6 @@ fn handle_tool_call_item(
         "type": "function",
         "function": { "name": name, "arguments": arguments },
     }));
-    true
 }
 
 fn build_generic_message(
@@ -777,36 +787,43 @@ fn message_content_parts(message: &Value) -> Vec<Value> {
             for part in items {
                 let Some(p) = part.as_object() else { continue };
                 let ptype = p.get("type").and_then(Value::as_str).unwrap_or("");
-                if matches!(ptype, "text" | "output_text") {
-                    if let Some(text) = p.get("text").and_then(Value::as_str) {
-                        if !text.is_empty() {
-                            let part_ann = p
-                                .get("annotations")
-                                .and_then(Value::as_array)
-                                .cloned()
-                                .unwrap_or_default();
-                            let mut merged = msg_annotations.clone();
-                            for a in part_ann {
-                                if !merged.contains(&a) {
-                                    merged.push(a);
+                // Note: this site matches `text | output_text` only (NOT
+                // `input_text`), so it classifies explicitly rather than using
+                // `is_text()`.
+                match ContentPartType::classify(ptype) {
+                    ContentPartType::Text | ContentPartType::OutputText => {
+                        if let Some(text) = p.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                let part_ann = p
+                                    .get("annotations")
+                                    .and_then(Value::as_array)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let mut merged = msg_annotations.clone();
+                                for a in part_ann {
+                                    if !merged.contains(&a) {
+                                        merged.push(a);
+                                    }
                                 }
+                                parts.push(json!({
+                                    "type": "output_text",
+                                    "text": sanitize_string(text),
+                                    "annotations": merged,
+                                }));
                             }
-                            parts.push(json!({
-                                "type": "output_text",
-                                "text": sanitize_string(text),
-                                "annotations": merged,
-                            }));
                         }
                     }
-                } else if ptype == "refusal" {
-                    if let Some(refusal) = p.get("refusal").and_then(Value::as_str) {
-                        if !refusal.is_empty() {
-                            parts.push(json!({
-                                "type": "refusal",
-                                "refusal": sanitize_string(refusal),
-                            }));
+                    ContentPartType::Refusal => {
+                        if let Some(refusal) = p.get("refusal").and_then(Value::as_str) {
+                            if !refusal.is_empty() {
+                                parts.push(json!({
+                                    "type": "refusal",
+                                    "refusal": sanitize_string(refusal),
+                                }));
+                            }
                         }
                     }
+                    ContentPartType::InputText | ContentPartType::Other => {}
                 }
             }
         }
@@ -1114,7 +1131,7 @@ fn flatten_text_content(content: &Value) -> String {
                     Value::String(s) if !s.is_empty() => Some(s.clone()),
                     Value::Object(o) => {
                         let typ = o.get("type").and_then(Value::as_str).unwrap_or("");
-                        if matches!(typ, "input_text" | "output_text" | "text") {
+                        if ContentPartType::classify(typ).is_text() {
                             o.get("text")
                                 .and_then(Value::as_str)
                                 .filter(|s| !s.is_empty())
@@ -1173,12 +1190,13 @@ pub(crate) fn chat_message_content_from_response_content(content: Option<&Value>
                     }
                     Value::Object(o) => {
                         let typ = o.get("type").and_then(Value::as_str).unwrap_or("");
-                        if matches!(typ, "input_text" | "output_text" | "text") {
+                        let part_type = ContentPartType::classify(typ);
+                        if part_type.is_text() {
                             if let Some(text) = o.get("text").and_then(Value::as_str) {
                                 parts
                                     .push(json!({ "type": "text", "text": sanitize_string(text) }));
                             }
-                        } else if typ == "refusal" {
+                        } else if part_type == ContentPartType::Refusal {
                             if let Some(r) = o.get("refusal").and_then(Value::as_str) {
                                 if !r.is_empty() {
                                     parts.push(json!({
@@ -1229,7 +1247,7 @@ fn normalize_tool_output_content(value: Option<&Value>) -> String {
                 }
             }
             let typ = o.get("type").and_then(Value::as_str).unwrap_or("");
-            if matches!(typ, "input_text" | "output_text" | "text") {
+            if ContentPartType::classify(typ).is_text() {
                 if let Some(text) = o.get("text").and_then(Value::as_str) {
                     return text.to_owned();
                 }
