@@ -28,9 +28,10 @@ use serde_json::{json, Value};
 // wire contract and is pinned by tests — keeping them documents the full error
 // surface and lets the rendering stay proven. `#[allow(dead_code)]` is scoped to
 // the two variants, with this justification, rather than a blanket module allow.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
     /// Client sent something invalid → 400.
+    #[error("{message}")]
     InvalidRequest {
         message: String,
         code: &'static str,
@@ -39,8 +40,10 @@ pub enum BridgeError {
     /// Unsupported Responses input item → 400, carries the offending item type.
     /// Never constructed (see module note): the request path drops-with-warning.
     #[allow(dead_code)]
+    #[error("{message}")]
     UnsupportedInputItem { message: String, item_type: String },
     /// Upstream failed or returned an error status → 502 by default.
+    #[error("{message}")]
     Upstream {
         message: String,
         code: &'static str,
@@ -50,10 +53,13 @@ pub enum BridgeError {
     /// Internal streaming fault → 500. Never constructed (see module note):
     /// stream faults emit a terminal `response.failed` event instead.
     #[allow(dead_code)]
+    #[error("{message}")]
     Stream { message: String, code: &'static str },
     /// Session lookup miss for previous_response_id → 404.
+    #[error("{message}")]
     SessionNotFound { message: String },
     /// Request body exceeded the configured byte budget → 413.
+    #[error("{message}")]
     RequestBodyTooLarge { message: String },
 }
 
@@ -163,14 +169,6 @@ impl BridgeError {
         json!({ "error": error })
     }
 }
-
-impl std::fmt::Display for BridgeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.envelope())
-    }
-}
-
-impl std::error::Error for BridgeError {}
 
 impl IntoResponse for BridgeError {
     fn into_response(self) -> Response {
