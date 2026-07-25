@@ -60,9 +60,12 @@ fn attach_body_guard<G: Send + 'static>(resp: Response, guard: G) -> Response {
 // Request-log + correlation (outermost).
 // --------------------------------------------------------------------------- //
 
-/// Records a completed request's metrics and decrements the in-flight gauge on
-/// drop, so the observation spans the full streamed-body lifetime.
+/// Records a completed request's metrics, emits a structured per-request log
+/// line, and decrements the in-flight gauge on drop, so the observation spans
+/// the full streamed-body lifetime (the log fires when the body finishes or the
+/// client disconnects, not at handler return).
 struct RequestMetricsGuard {
+    request_id: String,
     method: String,
     path: String,
     status: u16,
@@ -74,6 +77,17 @@ impl Drop for RequestMetricsGuard {
         let duration_ms = self.start.elapsed().as_secs_f64() * 1000.0;
         metrics::record_request_full(&self.method, &self.path, self.status, duration_ms);
         metrics::dec_in_flight();
+        // Per-request access log, mirroring the Python bridge's JSON line
+        // (request_id / method / path / status / duration_ms) so operators keep
+        // the same observability after the Rust cutover.
+        tracing::info!(
+            request_id = %self.request_id,
+            method = %self.method,
+            path = %self.path,
+            status = self.status,
+            duration_ms = duration_ms as u64,
+            "request completed"
+        );
     }
 }
 
@@ -115,6 +129,7 @@ pub async fn request_log(req: Request, next: Next) -> Response {
     }
 
     let guard = RequestMetricsGuard {
+        request_id,
         method,
         path,
         status,
