@@ -1,18 +1,48 @@
 //! Prometheus metrics, registered once in a lazily-initialized registry.
 //!
-//! Metric names match the Python bridge so existing Grafana dashboards keep
-//! working against the Rust process.
+//! Metric names, labels, and histogram buckets match the Python bridge so
+//! existing Grafana dashboards keep working against the Rust process.
 
 use std::sync::OnceLock;
+use std::time::Instant;
 
-use prometheus::{Encoder, HistogramVec, IntCounterVec, Registry, TextEncoder};
+use prometheus::{
+    Encoder, HistogramVec, IntCounter, IntCounterVec, IntGauge, Registry, TextEncoder,
+};
 
 struct Metrics {
     registry: Registry,
     requests_total: IntCounterVec,
+    requests_in_flight: IntGauge,
+    request_duration_ms: HistogramVec,
     upstream_errors_total: IntCounterVec,
-    upstream_phase_seconds: HistogramVec,
+    // Low-level transport phase timing, labelled by phase and stream flag.
+    // Observed via `observe_transport_phase` by the upstream client.
+    #[allow(dead_code)]
+    upstream_transport_phase_duration_ms: HistogramVec,
+    // Higher-level facade/orchestration phase timing, same label set.
+    #[allow(dead_code)]
+    upstream_phase_duration_ms: HistogramVec,
+    // Current concurrent request count, moved by the concurrency-limit layer.
+    concurrency_usage: IntGauge,
+    // Responses→Chat conversion loss events by kind and item type, so
+    // previously silent degradation is observable.
+    transform_loss_total: IntCounterVec,
+    // Count of U+FFFD replacements the streaming decoder emitted for invalid
+    // upstream bytes, so silent stream corruption is observable.
+    stream_decode_replacements_total: IntCounter,
 }
+
+/// Request-duration buckets in milliseconds, matching the Python histogram.
+const DURATION_BUCKETS_MS: &[f64] = &[
+    10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0,
+];
+
+/// Upstream phase-duration buckets in milliseconds, matching the Python
+/// transport + facade histograms.
+const PHASE_BUCKETS_MS: &[f64] = &[
+    0.5, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+];
 
 fn metrics() -> &'static Metrics {
     static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -22,52 +52,127 @@ fn metrics() -> &'static Metrics {
         let requests_total = IntCounterVec::new(
             prometheus::opts!(
                 "bridge_requests_total",
-                "Total bridge requests by path and status"
+                "Total requests by method, path, status"
             ),
-            &["path", "status"],
+            &["method", "path", "status"],
+        )
+        .expect("valid metric");
+        let requests_in_flight =
+            IntGauge::new("bridge_requests_in_flight", "Currently in-flight requests")
+                .expect("valid metric");
+        let request_duration_ms = HistogramVec::new(
+            prometheus::histogram_opts!(
+                "bridge_request_duration_ms",
+                "Request duration in ms",
+                DURATION_BUCKETS_MS.to_vec()
+            ),
+            &["method", "path"],
         )
         .expect("valid metric");
         let upstream_errors_total = IntCounterVec::new(
             prometheus::opts!(
                 "bridge_upstream_errors_total",
-                "Upstream errors by model and status"
+                "Upstream errors by model and upstream status code"
             ),
             &["model", "status_code"],
         )
         .expect("valid metric");
-        let upstream_phase_seconds = HistogramVec::new(
+        let upstream_transport_phase_duration_ms = HistogramVec::new(
             prometheus::histogram_opts!(
-                "bridge_upstream_phase_seconds",
-                "Upstream request phase timing in seconds"
+                "bridge_upstream_transport_phase_duration_ms",
+                "Upstream transport phase duration in ms",
+                PHASE_BUCKETS_MS.to_vec()
             ),
-            &["phase"],
+            &["phase", "stream"],
+        )
+        .expect("valid metric");
+        let upstream_phase_duration_ms = HistogramVec::new(
+            prometheus::histogram_opts!(
+                "bridge_upstream_phase_duration_ms",
+                "Upstream facade/orchestration phase duration in ms",
+                PHASE_BUCKETS_MS.to_vec()
+            ),
+            &["phase", "stream"],
+        )
+        .expect("valid metric");
+        let concurrency_usage = IntGauge::new(
+            "bridge_concurrency_usage",
+            "Current concurrent request count (from semaphore)",
+        )
+        .expect("valid metric");
+        let transform_loss_total = IntCounterVec::new(
+            prometheus::opts!(
+                "bridge_transform_loss_total",
+                "Responses→Chat conversion loss events by kind and item type"
+            ),
+            &["kind", "item_type"],
+        )
+        .expect("valid metric");
+        let stream_decode_replacements_total = IntCounter::new(
+            "bridge_stream_decode_replacements_total",
+            "U+FFFD replacements emitted while decoding upstream stream bytes",
         )
         .expect("valid metric");
 
-        registry
-            .register(Box::new(requests_total.clone()))
-            .expect("register");
-        registry
-            .register(Box::new(upstream_errors_total.clone()))
-            .expect("register");
-        registry
-            .register(Box::new(upstream_phase_seconds.clone()))
-            .expect("register");
+        for collector in [
+            Box::new(requests_total.clone()) as Box<dyn prometheus::core::Collector>,
+            Box::new(requests_in_flight.clone()),
+            Box::new(request_duration_ms.clone()),
+            Box::new(upstream_errors_total.clone()),
+            Box::new(upstream_transport_phase_duration_ms.clone()),
+            Box::new(upstream_phase_duration_ms.clone()),
+            Box::new(concurrency_usage.clone()),
+            Box::new(transform_loss_total.clone()),
+            Box::new(stream_decode_replacements_total.clone()),
+        ] {
+            registry.register(collector).expect("register");
+        }
 
         Metrics {
             registry,
             requests_total,
+            requests_in_flight,
+            request_duration_ms,
             upstream_errors_total,
-            upstream_phase_seconds,
+            upstream_transport_phase_duration_ms,
+            upstream_phase_duration_ms,
+            concurrency_usage,
+            transform_loss_total,
+            stream_decode_replacements_total,
         }
     })
 }
 
-pub fn record_request(path: &str, status: u16) {
-    metrics()
-        .requests_total
-        .with_label_values(&[path, &status.to_string()])
+/// Record a completed request: increment the labelled counter and observe its
+/// duration. `method`/`path`/`status` mirror the Python access-log labels.
+pub fn record_request_full(method: &str, path: &str, status: u16, duration_ms: f64) {
+    let m = metrics();
+    m.requests_total
+        .with_label_values(&[method, path, &status.to_string()])
         .inc();
+    m.request_duration_ms
+        .with_label_values(&[method, path])
+        .observe(duration_ms);
+}
+
+/// Increment the in-flight gauge; paired with [`dec_in_flight`].
+pub fn inc_in_flight() {
+    metrics().requests_in_flight.inc();
+}
+
+/// Decrement the in-flight gauge.
+pub fn dec_in_flight() {
+    metrics().requests_in_flight.dec();
+}
+
+/// Increment the concurrency-usage gauge (a model route holds a permit).
+pub fn inc_concurrency() {
+    metrics().concurrency_usage.inc();
+}
+
+/// Decrement the concurrency-usage gauge.
+pub fn dec_concurrency() {
+    metrics().concurrency_usage.dec();
 }
 
 pub fn record_upstream_error(model: &str, status_code: &str) {
@@ -77,11 +182,91 @@ pub fn record_upstream_error(model: &str, status_code: &str) {
         .inc();
 }
 
-pub fn observe_phase(phase: &str, seconds: f64) {
+/// Observe a low-level upstream transport phase duration (milliseconds),
+/// labelled by phase and whether the request was streaming.
+pub fn observe_transport_phase(phase: &str, stream: bool, duration_ms: f64) {
     metrics()
-        .upstream_phase_seconds
-        .with_label_values(&[phase])
-        .observe(seconds);
+        .upstream_transport_phase_duration_ms
+        .with_label_values(&[phase, stream_label(stream)])
+        .observe(duration_ms);
+}
+
+/// Observe a higher-level upstream facade/orchestration phase duration
+/// (milliseconds), labelled by phase and whether the request was streaming.
+pub fn observe_phase(phase: &str, stream: bool, duration_ms: f64) {
+    metrics()
+        .upstream_phase_duration_ms
+        .with_label_values(&[phase, stream_label(stream)])
+        .observe(duration_ms);
+}
+
+/// Record a single Responses→Chat transform-loss event by kind and item type.
+/// `item_type` is `"none"` when the offending item had no `type` field, matching
+/// the Python collector's label for a missing type.
+pub fn record_transform_loss(kind: &str, item_type: Option<&str>) {
+    metrics()
+        .transform_loss_total
+        .with_label_values(&[kind, item_type.unwrap_or("none")])
+        .inc();
+}
+
+/// Which of the two upstream phase histograms an RAII [`PhaseTimer`] feeds.
+#[derive(Clone, Copy)]
+pub enum PhaseKind {
+    /// Low-level transport phase (`send` / `close` / `read_error_text`).
+    Transport,
+    /// Higher-level facade/orchestration phase (`request_retry` / `compat_cycle`).
+    Facade,
+}
+
+/// RAII timer that observes an upstream phase duration on drop, mirroring the
+/// Python `finally: ...observe(...)` pattern so the metric is recorded on every
+/// exit path (success, error, or early return). Duration is rounded to whole
+/// milliseconds to match the Python `round((now - start) * 1000)`.
+pub struct PhaseTimer {
+    kind: PhaseKind,
+    phase: &'static str,
+    stream: bool,
+    start: Instant,
+}
+
+impl PhaseTimer {
+    /// Start timing `phase` for the given histogram `kind` and stream flag.
+    pub fn start(kind: PhaseKind, phase: &'static str, stream: bool) -> Self {
+        Self {
+            kind,
+            phase,
+            stream,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for PhaseTimer {
+    fn drop(&mut self) {
+        let duration_ms = (self.start.elapsed().as_secs_f64() * 1000.0).round();
+        match self.kind {
+            PhaseKind::Transport => observe_transport_phase(self.phase, self.stream, duration_ms),
+            PhaseKind::Facade => observe_phase(self.phase, self.stream, duration_ms),
+        }
+    }
+}
+
+/// Render the `stream` histogram label the way the Python bridge does:
+/// `"stream"` for a streaming request, `"body"` for a buffered one.
+fn stream_label(stream: bool) -> &'static str {
+    if stream {
+        "stream"
+    } else {
+        "body"
+    }
+}
+
+/// Count U+FFFD replacements emitted while decoding upstream stream bytes.
+pub fn record_stream_decode_replacements(count: u64) {
+    if count > 0 {
+        metrics().stream_decode_replacements_total.inc_by(count);
+    }
 }
 
 /// Render all metrics in the Prometheus text exposition format.

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  gate:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Formatting is non-negotiable: fail on any diff.
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      # Lint gate: every warning is an error, including the test target.
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Full suite: unit + parity (golden fixtures are committed and
+      # embedded via include_str!, so no Python runtime is needed here) +
+      # property tests.
+      - name: test
+        run: cargo test --all-targets
+
+  parity-regen-check:
+    name: golden fixtures are in sync with Python bridge
+    runs-on: ubuntu-latest
+    # Advisory only: the Python bridge lives in a separate repo, so this job
+    # documents how to regenerate the fixtures rather than gating on it. It is
+    # skipped unless the sibling checkout is present.
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate and diff
+        run: |
+          uv run --project ../codex-chat-bridge \
+            tests/parity/generate_golden.py
+          uv run --project ../codex-chat-bridge \
+            tests/parity/generate_stream_golden.py
+          git diff --exit-code tests/parity/

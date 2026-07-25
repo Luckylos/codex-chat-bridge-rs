@@ -18,9 +18,17 @@ dashmap = "6"
 async-stream = "0.3"
 futures = "0.3"
 prometheus = "0.13"
+regex-lite = "0.1"
+rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+base64 = "0.22"
+proptest = "1"
 
 [profile.release]
 opt-level = 3

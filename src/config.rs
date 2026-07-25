@@ -6,8 +6,6 @@
 //! Rust — a plain struct whose fields the compiler guarantees are all set, so
 //! no declarative registry or "unset" sentinel is needed.
 
-use std::collections::BTreeMap;
-
 use serde_json::{Map, Value};
 
 /// A configuration error surfaced at startup so a malformed override fails
@@ -46,6 +44,30 @@ pub enum UnsupportedToolPolicy {
     Passthrough,
 }
 
+/// Process-global unsupported-tool policy, seeded once at startup by
+/// [`init_global_unsupported_tool_policy`]. Mirrors the Python bridge's global
+/// settings singleton: the tool-context builder needs the policy but has no
+/// `AppState` handle, so it reads this instead of threading config through
+/// every call site. Defaults to `Ignore` until initialized.
+static GLOBAL_UNSUPPORTED_TOOL_POLICY: std::sync::OnceLock<UnsupportedToolPolicy> =
+    std::sync::OnceLock::new();
+
+/// Seed the process-global unsupported-tool policy. Called once at startup
+/// after config parse. Subsequent calls are no-ops (the first value wins),
+/// matching the immutable-settings contract.
+pub fn init_global_unsupported_tool_policy(policy: UnsupportedToolPolicy) {
+    let _ = GLOBAL_UNSUPPORTED_TOOL_POLICY.set(policy);
+}
+
+/// Read the process-global unsupported-tool policy, or `Ignore` when unset
+/// (e.g. in unit tests that never call [`init_global_unsupported_tool_policy`]).
+pub fn global_unsupported_tool_policy() -> UnsupportedToolPolicy {
+    GLOBAL_UNSUPPORTED_TOOL_POLICY
+        .get()
+        .copied()
+        .unwrap_or(UnsupportedToolPolicy::Ignore)
+}
+
 impl UnsupportedToolPolicy {
     fn parse(raw: &str) -> Result<Self, ConfigError> {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -66,7 +88,13 @@ impl UnsupportedToolPolicy {
 
 /// Fully-resolved bridge configuration. Every field is populated by
 /// [`Config::from_env`]; there is no partially-constructed state.
+///
+/// Several fields (streaming toggle, tool policy lists) are parsed and validated
+/// at startup but consumed by the session/tool-namespace layer, so they read as
+/// dead until that lands. The `allow` keeps the full config contract in one
+/// place rather than reintroducing fields piecemeal.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -81,7 +109,6 @@ pub struct Config {
     pub upstream_tool_denylist: Vec<String>,
     pub upstream_drop_params: Vec<String>,
     pub upstream_extra_params: Map<String, Value>,
-    pub inbound_api_keys: Vec<String>,
 }
 
 impl Config {
@@ -143,7 +170,6 @@ impl Config {
             upstream_tool_denylist: csv_env("BRIDGE_UPSTREAM_TOOL_DENYLIST"),
             upstream_drop_params: json_str_list_env("BRIDGE_UPSTREAM_DROP_PARAMS")?,
             upstream_extra_params: json_object_env("BRIDGE_UPSTREAM_EXTRA_PARAMS")?,
-            inbound_api_keys: csv_env("BRIDGE_INBOUND_API_KEYS"),
         })
     }
 
@@ -155,6 +181,28 @@ impl Config {
     /// The `/v1/models` upstream URL.
     pub fn models_url(&self) -> String {
         format!("{}/models", self.upstream_base_url)
+    }
+
+    /// Build a config for tests without touching the environment, pointing the
+    /// upstream at a caller-supplied base URL (e.g. a mock server). Every other
+    /// field takes the same default `from_env` would apply.
+    #[cfg(test)]
+    pub fn for_test(upstream_base_url: impl Into<String>) -> Self {
+        Self {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            upstream_base_url: upstream_base_url.into(),
+            upstream_api_key: String::new(),
+            upstream_timeout_seconds: 60.0,
+            upstream_streaming: false,
+            upstream_max_retries: 2,
+            max_concurrent_requests: 20,
+            max_body_bytes: 10 * 1024 * 1024,
+            unsupported_tool_policy: UnsupportedToolPolicy::Ignore,
+            upstream_tool_denylist: Vec::new(),
+            upstream_drop_params: Vec::new(),
+            upstream_extra_params: Map::new(),
+        }
     }
 }
 
@@ -372,9 +420,4 @@ mod tests {
         assert_eq!(err.code, "config_invalid_json_object");
         clear_bridge_env();
     }
-
-    // Silence unused-import lint when the module grows; BTreeMap reserved for
-    // deterministic ordering helpers in later phases.
-    #[allow(dead_code)]
-    fn _reserved(_: BTreeMap<String, String>) {}
 }

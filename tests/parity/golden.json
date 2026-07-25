@@ -1,0 +1,273 @@
+[
+  {
+    "fn": "sanitize_string",
+    "input": "",
+    "output": ""
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "plain text",
+    "output": "plain text"
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "tab\tnewline\ncarriage\rreturn",
+    "output": "tab\tnewline\ncarriage\rreturn"
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "nul\u0000byte",
+    "output": "nulbyte"
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "bell\u0007and\u001bescape",
+    "output": "bellandescape"
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "unicode ✓ 世界 🌍",
+    "output": "unicode ✓ 世界 🌍"
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "mix\u0001of\u0002control\u001fchars",
+    "output": "mixofcontrolchars"
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "\u0000\u0001\u0002\u0003",
+    "output": ""
+  },
+  {
+    "fn": "sanitize_string",
+    "input": "trailing",
+    "output": "trailing"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "fs",
+      "read"
+    ],
+    "output": "fs__read"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "db",
+      "query"
+    ],
+    "output": "db__query"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+    ],
+    "output": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn__mmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+    ],
+    "output": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn__mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+    ],
+    "output": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn__mmmmmmmmmmmm__99f8816bf1bcfb5b"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "very_long_namespace_name",
+      "very_long_action_name_that_pushes_over_the_limit"
+    ],
+    "output": "very_long_namespace_name__very_long_action_nam__8ec9e03df1735eff"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界",
+      "动作动作动作动作动作动作动作动作动作动作动作动作动作动作动作动作动作动作动作动作"
+    ],
+    "output": "世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界世界__动作动作__64d477c570cd6ce4"
+  },
+  {
+    "fn": "flatten_namespace_tool_name",
+    "input": [
+      "emoji🌍",
+      "action🚀name"
+    ],
+    "output": "emoji🌍__action🚀name"
+  },
+  {
+    "fn": "short_sha256_hex",
+    "input": "",
+    "output": "e3b0c44298fc1c14"
+  },
+  {
+    "fn": "short_sha256_hex",
+    "input": "abc",
+    "output": "ba7816bf8f01cfea"
+  },
+  {
+    "fn": "short_sha256_hex",
+    "input": "the quick brown fox",
+    "output": "9ecb36561341d18e"
+  },
+  {
+    "fn": "short_sha256_hex",
+    "input": "世界🌍",
+    "output": "5966978cf637acaf"
+  },
+  {
+    "fn": "short_sha256_hex",
+    "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "output": "c2a908d98f5df987"
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "",
+    "output": ""
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "   ",
+    "output": ""
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"echo hello\"}",
+    "output": "echo hello"
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"multi\\nline\"}",
+    "output": "multi\nline"
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "{\"other\": \"no input field\"}",
+    "output": "{\"other\": \"no input field\"}"
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": 42}",
+    "output": "{\"input\": 42}"
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "not json at all",
+    "output": "not json at all"
+  },
+  {
+    "fn": "custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"unicode ✓\"}",
+    "output": "unicode ✓"
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "",
+    "output": null
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"ec",
+    "output": "ec"
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"echo hello\"}",
+    "output": "echo hello"
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"esc\\n",
+    "output": "esc\n"
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"uni\\u00e9",
+    "output": "unié"
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"input\": \"bad\\",
+    "output": "bad"
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"other\": \"x\"}",
+    "output": null
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"input\"",
+    "output": null
+  },
+  {
+    "fn": "partial_custom_tool_input_from_chat_arguments",
+    "input": "{\"input\":  \"  spaced",
+    "output": "  spaced"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": null,
+    "output": "{}"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": "",
+    "output": "{}"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": "   ",
+    "output": "{}"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": "{\"b\": 1, \"a\": 2}",
+    "output": "{\"a\":2,\"b\":1}"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": "{\"z\": {\"y\": 1, \"x\": 2}, \"a\": 3}",
+    "output": "{\"a\":3,\"z\":{\"x\":2,\"y\":1}}"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": "not json",
+    "output": "not json"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": {
+      "b": 1,
+      "a": 2
+    },
+    "output": "{\"a\":2,\"b\":1}"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": [
+      3,
+      1,
+      2
+    ],
+    "output": "[3,1,2]"
+  },
+  {
+    "fn": "canonicalize_tool_arguments",
+    "input": "{\"unicode\": \"世界\"}",
+    "output": "{\"unicode\":\"世界\"}"
+  }
+]
