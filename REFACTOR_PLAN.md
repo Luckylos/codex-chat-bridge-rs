@@ -1,0 +1,182 @@
+# codex-chat-bridge-rs — Clean-Room Refactor Plan (Highest-Standard, Idiomatic Rust)
+
+Date: 2026-07-25. Supersedes the prior "surgical, Python-parity-anchored" plan.
+
+## Directive
+
+Refactor to the **best possible idiomatic-Rust state**, as if this were a fresh
+top-tier greenfield project. **Do not consult the Python version for design.**
+The `Mirrors X.py` comments are archaeology and get deleted, not preserved.
+
+## The one non-negotiable constraint (ranks above "new project")
+
+This is a **live production service** that new-api → channel 101 → clients depend
+on *right now*. Clean-room means total freedom over **internal structure**; it
+does **not** mean redesigning the external contract.
+
+- **External behavior MUST NOT change.** The enforceable, semantically-correct
+  invariant is **structural + semantic + SSE-event-order** equivalence — NOT
+  raw byte-identity. Byte-identity is (a) impossible for streams (upstream token
+  chunking is non-deterministic — the same prompt yields a different delta count
+  per run, already proven), (b) unenforced by the oracle (`shape()` ignores
+  scalar values and sorts keys), and (c) semantically unnecessary (JSON object
+  key order carries no meaning). What must hold: same JSON envelope *structure*,
+  same field *values*, same SSE event names in the same *order*, same status
+  codes, same error shapes, same id prefixes.
+- **The one place bytes DO matter is already guarded**: serialized tool-call
+  `arguments` strings (`canonicalize_tool_arguments` → `to_string`) are
+  wire-visible bytes the client re-parses; these are pinned byte-for-byte by the
+  golden fixtures (`tests/parity/golden.json`, Value-equality) and must stay so.
+- Therefore the **oracle flips**: it was "Python production". It is now the
+  **pre-refactor Rust HEAD, frozen as tag `pre-refactor-baseline`**. The crate
+  becomes its own differential oracle. `scripts/shadow_diff.py` runs the frozen
+  baseline binary on :18091 vs the refactor build on :18095 and asserts
+  structural + semantic + SSE-order equivalence. This safety net is what lets us
+  refactor aggressively. **Gap to close in Phase 0**: the current oracle's
+  `shape()` drops scalar values — add value-level assertions on the non-stream
+  envelope + a full-response golden snapshot so semantic (not just structural)
+  drift is caught.
+
+## Why clean-room reverses earlier rejections
+
+The prior review rejected interior strong-typing citing "would break Python
+parity" and "丢字段风险". Both die under clean-room:
+
+- `#[serde(flatten)] extra: Map<String,Value>` already exists on
+  `ResponsesRequest` (types.rs:52) — proof that **tagged enum + flatten-extra +
+  `Unknown` catch-all** preserves lossless passthrough *and* gains exhaustive
+  compile-time dispatch. Best of both.
+- "mirror Python's dict-in-the-middle" was the *only* argument for staying on
+  `Value` in the interior. That argument is now void.
+
+So the plan is materially more ambitious than the surgical one.
+
+---
+
+## Target architecture
+
+```
+src/
+  lib.rs            # crate root: pub mod wiring, so tests/ + benches/ can link
+  main.rs           # thin: parse env, build Router, serve, signal handling ONLY
+  domain/
+    ids.rs          # ResponseId, CallId, ItemId newtypes (typed, Display, prefix-encapsulated)
+    protocol.rs     # tagged enums for input items / content parts / tool defs
+    reasoning.rs    # CanonicalEffort, ReasoningBucket enums (already good, moved)
+  responses_to_chat/    # request direction (was convert.rs input half)
+  chat_to_responses/    # response direction (was convert.rs output half)
+  message_normalization.rs   # the ~170-line cohesive subsystem, extracted
+  tool_arguments.rs          # canonicalize + custom-input + nested-namespace, unified
+  tools/            # context (registry) + stream_tools (incremental FSM)
+  streaming/        # envelope, events, message/reasoning/inline-think FSMs, orchestrator
+  http/             # middleware, error, routes
+  upstream.rs       # unchanged transport
+  config.rs metrics.rs sse.rs sha256.rs session_store.rs session_bridge.rs
+tests/              # integration tests extracted from main.rs
+benches/            # criterion micro-benches on the hot transform path (new)
+```
+
+---
+
+## Phases (each: independent commit, all 6 gates green before next)
+
+### Gate set (every phase)
+1. `cargo build --release`
+2. `cargo test` (all pass)
+3. `cargo clippy --all-targets -- -D warnings` **and** a clean pass under
+   `-W clippy::pedantic` triage (fix real ones, `#[allow]` w/ justification only
+   where pedantic is wrong)
+4. `cargo fmt --check`
+5. **`scripts/shadow_diff.py` baseline-vs-refactor: multi-model ALL ALIGNED**
+   (structural + semantic + SSE-order equivalence oracle — a fail reverts the
+   phase). Value-level assertions must be on, not just `shape()`.
+6. RSS/fd/panic health after a concurrent stress burst
+
+### Phase 0 — Freeze the oracle + scaffolding
+- Tag `pre-refactor-baseline` at HEAD `35bf058`; build that binary once, keep it
+  at `bin/codex-chat-bridge-baseline` for the differential harness.
+- Point `shadow_diff.py` at baseline:18091 vs refactor:18095 (both same env).
+- **Harden the oracle first (it currently under-checks):** `shape()` drops
+  scalar values, so a value-level regression (wrong status string, wrong id
+  prefix, dropped field content) would pass silently. Add: (a) value-equality on
+  the full non-stream `/v1/responses` envelope, (b) a committed full-response
+  golden snapshot per model, (c) keep the collapsed-SSE-order check for streams.
+  Do this before Phase 1 or the whole safety net is weaker than it looks.
+- Delete 8 stale `#![allow(dead_code)]` (verified 0-warning without them).
+- **lib.rs/main.rs split**; move `mod integration_tests` out of main.rs into
+  `tests/`. This alone is a large idiomatic win (doc-tests, benches, faster
+  incremental test builds).
+
+### Phase 1 — Typed ids (domain/ids.rs)
+- `ResponseId`, `CallId`, `ItemId` newtypes; prefix logic (`resp_bridge_`, `fc_`,
+  `ctc_`, `rs_`, `msg_`) encapsulated as the newtypes' only concern.
+- `Display`/`AsRef<str>`; ban raw `format!("fc_{}")` scattering.
+- Wire output identical (same rendered strings) → oracle proves it.
+
+### Phase 2 — Interior protocol enums (domain/protocol.rs) — the big one
+- Replace the 16 stringly-typed `get("type").as_str()` dispatch sites with
+  `#[derive(Deserialize)] #[serde(tag = "type")]` enums:
+  `InputItem`, `ContentPart`, `ResponseOutputItem`, `ToolDef`.
+- **CORRECTION on lossless-ness (this is the crux — the naive plan loses data):**
+  `#[serde(other)]` only works on **unit variants** — it CANNOT capture the
+  payload, so it is NOT a lossless fallback. Two rules make this safe:
+  1. Recognized variants that must passthrough unknown sibling keys carry
+     `#[serde(flatten)] extra: Map<String,Value>` (the pattern already proven on
+     `ResponsesRequest`), so re-serialization preserves every field.
+  2. **Unrecognized items bypass the enum entirely** — the decode target is
+     `enum Item { Known(TypedVariant), Unknown(Value) }` via
+     `#[serde(untagged)]`, where the `Unknown(Value)` arm holds the original
+     `Value` and is re-emitted verbatim. An item we don't model must never go
+     through a typed decode→encode cycle, or its bytes/order can drift.
+  - Losslessness becomes a **proptest**: `parse(x).reserialize() == x` (as
+    Value-equality) for arbitrary protocol-shaped JSON, including unknown types.
+- Dispatch (`append_input_items`, `tool_call_to_response_item`, …) becomes
+  exhaustive `match`. These stay "dispatchers" (branch = variant) but now the
+  compiler guarantees totality — the *good* kind of dispatcher.
+- This is where most of the "typo-can't-compile" safety is won. Highest risk of
+  behavioral drift → lean hardest on the oracle + the round-trip proptests.
+- **Scope discipline**: only enum-ize the interior shapes actually *dispatched
+  on* (the 16 sites). Do not model fields the bridge merely passes through — those
+  stay `Value`. Type-safety where we branch, passthrough where we don't.
+
+### Phase 3 — Split convert.rs by direction
+- `responses_to_chat/` (23 fns) + `chat_to_responses/` (7 fns) as sibling
+  modules; extract `message_normalization.rs` and `tool_arguments.rs`.
+- Pure module-boundary moves; oracle guards behavior.
+
+### Phase 4 — thiserror-based error type (http/error.rs)
+- Replace hand-rolled `Display`/`Error` with `#[derive(thiserror::Error)]`
+  (the dep is already declared). `envelope()` unchanged → wire error bytes
+  identical (already covered by the `param` sorted-json tests + oracle Case 5).
+
+### Phase 5 — ToolSpec discriminants → enums (tools/)
+- `kind` (function/custom/tool_search/namespace) and `namespace_strategy`
+  (nested_oneof/nested_anyof/flat) String → enum; all comparison sites become
+  exhaustive matches.
+
+### Phase 6 — stream_tools push_delta/finalize_state cleanup
+- Collapse the ~9 borrow-checker-forced `get_mut(&index)` re-lookups via a
+  `with_state(index, |s| …)` helper. Nested-buffer tri-state logic unchanged.
+
+### Phase 7 — Sweep + polish
+- Delete all `Mirrors X.py` comments (139) — replace with genuine module-purpose
+  docs written fresh, not Python cross-refs.
+- `benches/` criterion on the transform hot path (establish a perf floor).
+- Final `-W clippy::pedantic` triage pass across the whole crate.
+- Doc-test the public API of each domain module.
+
+---
+
+## Delivery gate
+- All phases' commits on a `refactor/clean-room` branch.
+- Full `shadow_diff.py` multi-model ALL ALIGNED on the final build.
+- Coverage ≥ prior 87.69%; core modules stay 98-100%.
+- Then fast-forward to master, rebuild release, atomic-mv deploy, verify via
+  new-api channel-test + journal, exactly as the cutover runbook.
+
+## Explicitly still NOT done (even at highest standard, these are net-negative)
+- Redesigning the external API surface (violates the one hard constraint).
+- Splitting genuine protocol dispatchers into artificial sub-fns (branch count =
+  protocol arity is *inherent*; typed-enum match is the idiomatic end state, not
+  further fragmentation).
+- Config knobs / abstraction for hypothetical future providers (YAGNI).
