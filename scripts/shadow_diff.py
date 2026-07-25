@@ -114,6 +114,37 @@ def output_types(obj):
     return [item.get("type") for item in obj.get("output", [])]
 
 
+# Fields whose values are upstream-sampled / per-run non-deterministic and must
+# be masked (compared by type, not value) so the oracle does not flag benign
+# variation. EVERYTHING ELSE is compared by value — this is what closes the
+# gap where `shape()` silently ignored wrong `object`/`role`/`status`/finish
+# mappings and dropped field content.
+_SAMPLED_KEYS = {
+    "id", "created_at", "created", "delta", "text", "arguments", "call_id",
+    "usage", "input_tokens", "output_tokens", "total_tokens", "content_text",
+    "response_id", "previous_response_id", "fingerprint", "system_fingerprint",
+    "model",  # upstream may echo a resolved model alias
+    # Free-text the model regenerates per call (same prompt -> different prose):
+    # the assistant's reasoning trace and the reassembled top-level output text.
+    # These are the semantic payload, not the structural contract.
+    "reasoning_content", "output_text",
+}
+
+
+def structural_values(v, key=None):
+    """Deterministic projection: keep every field's VALUE except the sampled
+    ones (masked to their type). Reveals value-level drift (wrong status
+    string, wrong role, wrong object, wrong finish->status mapping, dropped or
+    added deterministic fields) that the type-only `shape()` cannot see."""
+    if key in _SAMPLED_KEYS:
+        return f"<{type(v).__name__}>"
+    if isinstance(v, dict):
+        return {k: structural_values(v[k], k) for k in sorted(v)}
+    if isinstance(v, list):
+        return [structural_values(e, key) for e in v]
+    return v
+
+
 def id_prefixes(obj):
     """Every output item id prefix — must be bridge-shaped, no upstream UUID."""
     pref = []
@@ -140,6 +171,9 @@ try:
     diff("1.output_types", output_types(pj), output_types(rj))
     diff("1.id_prefixes", id_prefixes(pj), id_prefixes(rj))
     diff("1.status_field", pj.get("status"), rj.get("status"))
+    # Value-level: every deterministic field's VALUE must match (sampled
+    # scalars masked). Catches wrong object/role/status/finish-mapping drift.
+    diff("1.structural_values", structural_values(pj), structural_values(rj))
 except Exception as e:
     print(f"    Case 1 ERROR: {e}")
 
@@ -181,6 +215,8 @@ try:
     diff("3.second_status", ps2, rs2)
     diff("3.second_shape", shape(json.loads(pr2)), shape(json.loads(rr2)))
     diff("3.second_output_types", output_types(json.loads(pr2)), output_types(json.loads(rr2)))
+    diff("3.second_structural_values",
+         structural_values(json.loads(pr2)), structural_values(json.loads(rr2)))
 except Exception as e:
     print(f"    Case 3 ERROR: {e}")
 
@@ -210,6 +246,11 @@ try:
     def fc_shape(obj):
         return [shape(i) for i in obj.get("output", []) if i.get("type") == "function_call"]
     diff("4.function_call_shape", fc_shape(pj), fc_shape(rj))
+    # Value-level on the tool-call items (name/status/etc; arguments+call_id
+    # are sampled and masked). Catches a wrong tool-call envelope shape.
+    def fc_values(obj):
+        return [structural_values(i) for i in obj.get("output", []) if i.get("type") == "function_call"]
+    diff("4.function_call_values", fc_values(pj), fc_values(rj))
 except Exception as e:
     print(f"    Case 4 ERROR: {e}")
 
