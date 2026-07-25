@@ -1,0 +1,29 @@
+[package]
+name = "codex-chat-bridge"
+version = "0.4.0"
+edition = "2021"
+
+[[bin]]
+name = "codex-chat-bridge"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+dashmap = "6"
+async-stream = "0.3"
+futures = "0.3"
+prometheus = "0.13"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
