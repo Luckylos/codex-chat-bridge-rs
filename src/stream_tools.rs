@@ -446,6 +446,35 @@ impl ToolStateStore {
         }
     }
 
+    /// Read-only projection of the state at `index`, or `default` when the
+    /// index has no state yet. Collapses the repeated
+    /// `self.tool_calls.get(&index).map(..).unwrap_or(..)` lookups.
+    fn state_or<T>(&self, index: i64, default: T, f: impl FnOnce(&ToolCallState) -> T) -> T {
+        self.tool_calls.get(&index).map(f).unwrap_or(default)
+    }
+
+    /// Mutate the state at `index` when present. Centralizes the
+    /// `if let Some(state) = self.tool_calls.get_mut(&index)` side-effect dance.
+    fn modify_state(&mut self, index: i64, f: impl FnOnce(&mut ToolCallState)) {
+        if let Some(state) = self.tool_calls.get_mut(&index) {
+            f(state);
+        }
+    }
+
+    /// Like `modify_state` but also lends the shared tool context, for the
+    /// nested-namespace helpers that resolve specs against it. Split-borrows
+    /// the two fields so the borrow checker sees they are disjoint.
+    fn with_ctx_state_mut(
+        &mut self,
+        index: i64,
+        f: impl FnOnce(&BridgeToolContext, &mut ToolCallState),
+    ) {
+        let ctx = &self.tool_context;
+        if let Some(state) = self.tool_calls.get_mut(&index) {
+            f(ctx, state);
+        }
+    }
+
     /// Claim a stable output index for `state`, `base + index`, so parallel
     /// tool calls preserve their upstream ordering. Mirrors
     /// `ToolStateStore._ensure_output_index`.
@@ -578,42 +607,27 @@ impl ToolStateStore {
         if !already_added && has_identity {
             self.maybe_start_nested_buffer(envelope, index);
         }
-        let nested_buffered = self
-            .tool_calls
-            .get(&index)
-            .map(|s| s.nested_buffered)
-            .unwrap_or(false);
+        let nested_buffered = self.state_or(index, false, |s| s.nested_buffered);
         if nested_buffered {
             let events = self.emit_buffered_nested_events(envelope, index);
-            let still_buffered = self
-                .tool_calls
-                .get(&index)
-                .map(|s| s.nested_buffered)
-                .unwrap_or(false);
+            let still_buffered = self.state_or(index, false, |s| s.nested_buffered);
             if !events.is_empty() || !still_buffered {
                 return events;
             }
             // Still unresolved: degrade to a namespace-level call once the
             // buffer grows past the cap, so a never-closing action selector
             // can't stall the stream indefinitely.
-            let overflowed = self
-                .tool_calls
-                .get(&index)
-                .map(|s| s.arguments.len() > NAMESPACE_BUFFER_MAX_BYTES)
-                .unwrap_or(false);
+            let overflowed = self.state_or(index, false, |s| {
+                s.arguments.len() > NAMESPACE_BUFFER_MAX_BYTES
+            });
             if overflowed {
-                {
-                    let ctx = &self.tool_context;
-                    if let Some(state) = self.tool_calls.get_mut(&index) {
-                        degrade_buffered_namespace(ctx, state);
-                    }
-                }
+                self.with_ctx_state_mut(index, degrade_buffered_namespace);
                 let (mut added_events, _) = self.ensure_added(envelope, index);
-                if let Some(state) = self.tool_calls.get_mut(&index) {
+                self.modify_state(index, |state| {
                     if !state.arguments.is_empty() {
                         added_events.extend(emit_arguments_incremental(state));
                     }
-                }
+                });
                 return added_events;
             }
             return Vec::new();
@@ -722,40 +736,25 @@ impl ToolStateStore {
         let mut events = Vec::new();
         // Flush any still-buffered nested-namespace call: resolve its action if
         // the buffer now parses, otherwise degrade to a namespace-level call.
-        {
-            let ctx = &self.tool_context;
-            if let Some(state) = self.tool_calls.get_mut(&index) {
-                flush_buffered_nested_state(ctx, state);
-            }
-        }
-        let has_identity = self
-            .tool_calls
-            .get(&index)
-            .map(|s| !s.call_id.is_empty() || !s.name.is_empty())
-            .unwrap_or(false);
-        let already_added = self
-            .tool_calls
-            .get(&index)
-            .map(|s| s.added)
-            .unwrap_or(false);
+        self.with_ctx_state_mut(index, flush_buffered_nested_state);
+        let has_identity = self.state_or(index, false, |s| {
+            !s.call_id.is_empty() || !s.name.is_empty()
+        });
+        let already_added = self.state_or(index, false, |s| s.added);
         if !already_added && has_identity {
             let (added_events, _) = self.ensure_added(envelope, index);
             events.extend(added_events);
         }
 
-        let name = self
-            .tool_calls
-            .get(&index)
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
+        let name = self.state_or(index, String::new(), |s| s.name.clone());
         let kind = resolve_tool_kind(&self.tool_context, &name);
 
         if !kind.is_custom {
-            if let Some(state) = self.tool_calls.get_mut(&index) {
+            self.modify_state(index, |state| {
                 if state.emitted_arguments != state.arguments {
                     events.extend(emit_arguments_incremental(state));
                 }
-            }
+            });
         }
 
         let emission = {
