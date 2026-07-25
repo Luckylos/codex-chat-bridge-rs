@@ -18,10 +18,8 @@ struct Metrics {
     upstream_errors_total: IntCounterVec,
     // Low-level transport phase timing, labelled by phase and stream flag.
     // Observed via `observe_transport_phase` by the upstream client.
-    #[allow(dead_code)]
     upstream_transport_phase_duration_ms: HistogramVec,
     // Higher-level facade/orchestration phase timing, same label set.
-    #[allow(dead_code)]
     upstream_phase_duration_ms: HistogramVec,
     // Current concurrent request count, moved by the concurrency-limit layer.
     concurrency_usage: IntGauge,

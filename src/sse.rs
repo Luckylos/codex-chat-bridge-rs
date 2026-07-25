@@ -6,8 +6,7 @@
 //! * **inbound** — [`extract_block`] carves complete frames out of a growing
 //!   decode buffer (delimiter is a blank line) and [`parse_sse_block`] splits a
 //!   frame into its `event:` name and reassembled `data:` payload;
-//! * **outbound** — [`serialize_event`] renders one Responses SSE event and
-//!   [`sse_done`] emits the terminal `[DONE]` sentinel.
+//! * **outbound** — [`serialize_event`] renders one Responses SSE event.
 //!
 //! Keeping these as free functions over `&str`/`&Value` means the stream state
 //! machine can be exercised without a live socket.
@@ -16,7 +15,6 @@
 //! consumed by the envelope + increment state machines and the top-level
 //! orchestrator that land in the following layers, so the functions read as
 //! dead until those wire in. Tests lock in the frame contract now.
-#![allow(dead_code)]
 
 use serde_json::Value;
 
@@ -81,11 +79,6 @@ pub fn serialize_event(event: Option<&str>, data: &Value) -> Vec<u8> {
     out.push('\n');
     out.push('\n');
     out.into_bytes()
-}
-
-/// The terminal `data: [DONE]` sentinel that closes an SSE stream.
-pub fn sse_done() -> Vec<u8> {
-    b"data: [DONE]\n\n".to_vec()
 }
 
 #[cfg(test)]
@@ -162,11 +155,6 @@ mod tests {
             String::from_utf8(bytes).unwrap(),
             "data: {\"msg\":\"café\"}\n\n"
         );
-    }
-
-    #[test]
-    fn done_sentinel_is_fixed() {
-        assert_eq!(sse_done(), b"data: [DONE]\n\n");
     }
 
     #[test]

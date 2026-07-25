@@ -25,7 +25,6 @@
 //! Driven by the top-level stream orchestrator that lands in a later layer, so
 //! the state machine reads as dead until it wires in. Tests lock in the event
 //! sequence now.
-#![allow(dead_code)]
 
 use std::collections::HashSet;
 
@@ -42,7 +41,6 @@ enum Segment {
         annotations: Vec<Value>,
     },
     Refusal {
-        content_index: usize,
         refusal: String,
     },
 }
@@ -217,7 +215,6 @@ impl MessageState {
         let mut events = self.ensure_message_item_started(envelope);
         let content_index = self.segments.len();
         self.segments.push(Segment::Refusal {
-            content_index,
             refusal: refusal.to_owned(),
         });
         let part = json!({ "type": "refusal", "refusal": refusal });

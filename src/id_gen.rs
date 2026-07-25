@@ -51,7 +51,6 @@ pub fn function_call_item_id(call_id: &str) -> String {
 /// Output item id for a `custom_tool_call` item, derived from its call id.
 /// Emitted by the tool-namespace rendering that lands in Phase 3; the prefix
 /// contract is locked in (and tested) now so both render paths agree.
-#[allow(dead_code)]
 pub fn custom_tool_call_item_id(call_id: &str) -> String {
     format!("ctc_{call_id}")
 }

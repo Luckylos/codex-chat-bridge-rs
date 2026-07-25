@@ -89,12 +89,7 @@ impl UnsupportedToolPolicy {
 /// Fully-resolved bridge configuration. Every field is populated by
 /// [`Config::from_env`]; there is no partially-constructed state.
 ///
-/// Several fields (streaming toggle, tool policy lists) are parsed and validated
-/// at startup but consumed by the session/tool-namespace layer, so they read as
-/// dead until that lands. The `allow` keeps the full config contract in one
-/// place rather than reintroducing fields piecemeal.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -106,8 +101,22 @@ pub struct Config {
     pub max_concurrent_requests: usize,
     pub max_body_bytes: usize,
     pub unsupported_tool_policy: UnsupportedToolPolicy,
+    // KNOWN PORTING GAP (not dead config): these three fields are the outbound
+    // "upstream body policy" — the Python bridge parses the same env vars AND
+    // applies them at the single send boundary (`upstream_body_policy.apply()`),
+    // so a `tool_denylist` / `drop_params` / `extra_params` operator override
+    // reshapes the bytes that leave the bridge without a code change. The Rust
+    // port parses + validates them (below, with tests) but does NOT yet apply
+    // them on the send path — so they read as never-used. They are retained,
+    // not deleted, because deleting them would silently drop a live Python
+    // capability. Wiring `.apply()` into `upstream.rs` is a deferred feature,
+    // out of scope for the behavior-neutral refactor. Currently no-op in prod
+    // (the env vars are unset), which is why removing them looked "safe".
+    #[allow(dead_code)]
     pub upstream_tool_denylist: Vec<String>,
+    #[allow(dead_code)]
     pub upstream_drop_params: Vec<String>,
+    #[allow(dead_code)]
     pub upstream_extra_params: Map<String, Value>,
 }
 

@@ -14,7 +14,6 @@
 //! `ensure_started` / `finalize`. Until those land the envelope reads as dead,
 //! so the module carries `allow(dead_code)`; the tests lock in the event
 //! contract now.
-#![allow(dead_code)]
 
 use serde_json::{json, Map, Value};
 

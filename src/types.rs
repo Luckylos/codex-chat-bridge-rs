@@ -30,8 +30,15 @@ pub struct ResponsesRequest {
     pub tools: Option<Value>,
     #[serde(default)]
     pub tool_choice: Option<Value>,
-    // Structured-output `text` config; consumed by the streaming/response-format
-    // handling in a later phase. Retained now so the request envelope is complete.
+    // KNOWN PORTING GAP (not dead field): the Responses structured-output `text`
+    // config. The Python bridge reads `text.format` and injects it as the
+    // outbound Chat `response_format` (`request._response_format_from_payload`),
+    // so a client requesting structured output actually gets it. The Rust port
+    // deserializes this field but does NOT yet consume it — retained, not
+    // deleted, because dropping it would silently regress a live Python
+    // capability. Wiring it into the request builder is a deferred feature, out
+    // of scope for the behavior-neutral refactor. Currently 0 hits in 24h of
+    // production traffic, which is why it read as "never used".
     #[serde(default)]
     #[allow(dead_code)]
     pub text: Option<Value>,

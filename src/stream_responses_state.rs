@@ -27,7 +27,6 @@ use crate::stream_tools::ToolStateStore;
 // Constructed by the SSE consumer loop that lands in the next layer, so the
 // type and its methods read as dead until that wires in. Tests exercise the
 // full surface now.
-#[allow(dead_code)]
 pub struct ResponsesStreamState {
     envelope: ResponseEnvelopeState,
     reasoning: ReasoningState,
@@ -36,7 +35,6 @@ pub struct ResponsesStreamState {
     inline_think: InlineThinkStateMachine,
 }
 
-#[allow(dead_code)]
 impl ResponsesStreamState {
     pub fn new(tool_context: BridgeToolContext, response_id: Option<&str>) -> Self {
         Self {

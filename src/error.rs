@@ -12,11 +12,23 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-// UnsupportedInputItem / Stream / SessionNotFound are constructed by the
-// streaming (Phase 2) and session-store (Phase 3) layers; their status/envelope
-// rendering is already covered by tests so the wire contract is locked in now.
+// INTENTIONAL BEHAVIOR DIFFERENCE (not dead variants): `UnsupportedInputItem`
+// and `Stream` are never *constructed* by the Rust port, and that is by design,
+// not an oversight:
+//   * Unsupported hosted tools — the Python bridge raises `UnsupportedInputItem`
+//     under the reject/error policy; the Rust request path has no per-tool error
+//     channel at build time and deliberately drops-with-warning instead
+//     (see `context.rs` add_response_tool). Production default policy is Ignore,
+//     so this path never triggers a client-visible error either way.
+//   * Streaming faults — the Rust stream path surfaces failures as a terminal
+//     `response.failed` SSE event via `envelope.failed_event`, NOT as a thrown
+//     `Stream` error (a stream that already sent 200 + headers cannot switch to
+//     an HTTP error body).
+// Both variants are retained because their status/envelope *rendering* is the
+// wire contract and is pinned by tests — keeping them documents the full error
+// surface and lets the rendering stay proven. `#[allow(dead_code)]` is scoped to
+// the two variants, with this justification, rather than a blanket module allow.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum BridgeError {
     /// Client sent something invalid → 400.
     InvalidRequest {
@@ -25,6 +37,8 @@ pub enum BridgeError {
         detail: Option<Value>,
     },
     /// Unsupported Responses input item → 400, carries the offending item type.
+    /// Never constructed (see module note): the request path drops-with-warning.
+    #[allow(dead_code)]
     UnsupportedInputItem { message: String, item_type: String },
     /// Upstream failed or returned an error status → 502 by default.
     Upstream {
@@ -33,7 +47,9 @@ pub enum BridgeError {
         status: StatusCode,
         detail: Option<Value>,
     },
-    /// Internal streaming fault → 500.
+    /// Internal streaming fault → 500. Never constructed (see module note):
+    /// stream faults emit a terminal `response.failed` event instead.
+    #[allow(dead_code)]
     Stream { message: String, code: &'static str },
     /// Session lookup miss for previous_response_id → 404.
     SessionNotFound { message: String },

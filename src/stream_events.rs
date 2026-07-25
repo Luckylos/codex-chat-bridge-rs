@@ -7,18 +7,10 @@
 //!
 //! These are shared by the reasoning / message / tool increment state machines
 //! that land in the following layers, so they read as dead until those wire in.
-#![allow(dead_code)]
 
 use serde_json::{json, Value};
 
 use crate::sse::serialize_event;
-
-/// `response.<lifecycle>` — the envelope-level event carrying a full response
-/// object (created / in_progress / completed / failed).
-pub fn response_event(event_name: &str, response: Value) -> Vec<u8> {
-    let payload = json!({ "type": event_name, "response": response });
-    serialize_event(Some(event_name), &payload)
-}
 
 pub fn output_item_added(output_index: i64, item: Value) -> Vec<u8> {
     let payload = json!({
@@ -257,16 +249,5 @@ mod tests {
         let (event, payload) = parse(&custom_input_done("ctc_1", 4, "raw"));
         assert_eq!(event, "response.custom_tool_call_input.done");
         assert_eq!(payload["input"], json!("raw"));
-    }
-
-    #[test]
-    fn response_event_wraps_response_object() {
-        let (event, payload) = parse(&response_event(
-            "response.completed",
-            json!({ "id": "resp_1", "status": "completed" }),
-        ));
-        assert_eq!(event, "response.completed");
-        assert_eq!(payload["type"], json!("response.completed"));
-        assert_eq!(payload["response"]["status"], json!("completed"));
     }
 }

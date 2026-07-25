@@ -16,7 +16,6 @@
 //! fields without a self-aliasing conflict.
 //!
 //! Driven by the streaming orchestrator; reads as dead until that wires in.
-#![allow(dead_code)]
 
 use crate::reasoning::{
     could_be_partial_think_open, find_think_close, match_think_open_at_start,
@@ -57,10 +56,12 @@ impl InlineThinkStateMachine {
         }
     }
 
+    #[cfg(test)]
     pub fn is_text_phase(&self) -> bool {
         self.phase == Phase::Text
     }
 
+    #[cfg(test)]
     pub fn is_detecting_or_reasoning(&self) -> bool {
         self.phase != Phase::Text
     }

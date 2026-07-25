@@ -26,7 +26,6 @@
 //! Driven by the top-level stream orchestrator that lands in a later layer, so
 //! the store reads as dead until it wires in. Tests lock in the event
 //! sequence now.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
