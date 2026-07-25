@@ -97,26 +97,72 @@ fn tool_name_from_value(tool: &Value) -> Option<String> {
 // ToolSpec (mirrors bridge_context/models.py)
 // --------------------------------------------------------------------------- //
 
+/// The origin kind of a registered Chat tool. Replaces the former stringly-typed
+/// `kind` field so an invalid value cannot be constructed and every match is
+/// total. `as_str()` renders the exact Python `ToolSpec.kind` bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolKind {
+    Function,
+    Custom,
+    ToolSearch,
+    Namespace,
+}
+
+/// The schema strategy for a namespace tool. Mirrors the Python namespace
+/// strategy strings; unknown/absent values fall back to `Flat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceStrategy {
+    NestedOneof,
+    NestedAnyof,
+    Flat,
+}
+
+impl NamespaceStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NestedOneof => "nested_oneof",
+            Self::NestedAnyof => "nested_anyof",
+            Self::Flat => "flat",
+        }
+    }
+
+    /// Parse a (lowercased) strategy string, defaulting unknown/absent to
+    /// `Flat`. The caller warns on the unrecognized-but-non-flat case, so the
+    /// raw string is inspected there, not here.
+    fn from_str_or_flat(s: &str) -> Self {
+        match s {
+            "nested_oneof" => Self::NestedOneof,
+            "nested_anyof" => Self::NestedAnyof,
+            _ => Self::Flat,
+        }
+    }
+
+    /// True for the action-selector strategies (as opposed to `Flat`).
+    fn is_nested(self) -> bool {
+        matches!(self, Self::NestedOneof | Self::NestedAnyof)
+    }
+}
+
 /// The origin of a registered Chat tool, used to translate upstream tool calls
 /// back into the correct Responses item shape. Mirrors the Python `ToolSpec`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
-    /// `"function" | "custom" | "tool_search" | "namespace"`.
-    pub kind: String,
+    /// The tool's origin kind.
+    pub kind: ToolKind,
     /// The original Responses-side tool name.
     pub name: String,
     /// The namespace this tool belongs to, when any.
     pub namespace: Option<String>,
-    /// `"nested_oneof" | "nested_anyof" | "flat" | None` for namespace tools.
-    pub namespace_strategy: Option<String>,
-    /// Sub-tool action names when `kind == "namespace"`.
+    /// The namespace schema strategy, when `kind == Namespace`.
+    pub namespace_strategy: Option<NamespaceStrategy>,
+    /// Sub-tool action names when `kind == Namespace`.
     pub actions: Option<Vec<String>>,
 }
 
 impl ToolSpec {
     fn function(name: impl Into<String>, namespace: Option<String>) -> Self {
         Self {
-            kind: "function".to_owned(),
+            kind: ToolKind::Function,
             name: name.into(),
             namespace,
             namespace_strategy: None,
@@ -126,7 +172,7 @@ impl ToolSpec {
 
     fn custom(name: impl Into<String>) -> Self {
         Self {
-            kind: "custom".to_owned(),
+            kind: ToolKind::Custom,
             name: name.into(),
             namespace: None,
             namespace_strategy: None,
@@ -136,7 +182,7 @@ impl ToolSpec {
 
     fn tool_search() -> Self {
         Self {
-            kind: "tool_search".to_owned(),
+            kind: ToolKind::ToolSearch,
             name: TOOL_SEARCH_PROXY_NAME.to_owned(),
             namespace: None,
             namespace_strategy: None,
@@ -147,11 +193,11 @@ impl ToolSpec {
     /// True when this is a namespace tool using a nested (action-selector)
     /// strategy. Mirrors `ToolSpec.is_nested_namespace`.
     pub fn is_nested_namespace(&self) -> bool {
-        self.kind == "namespace"
-            && matches!(
-                self.namespace_strategy.as_deref(),
-                Some("nested_oneof") | Some("nested_anyof")
-            )
+        self.kind == ToolKind::Namespace
+            && self
+                .namespace_strategy
+                .map(NamespaceStrategy::is_nested)
+                .unwrap_or(false)
     }
 }
 
@@ -194,7 +240,7 @@ pub fn resolve_nested_namespace_arguments(
     };
 
     let raw_action = parsed.remove("action");
-    if spec.namespace_strategy.as_deref() == Some("nested_anyof") {
+    if spec.namespace_strategy == Some(NamespaceStrategy::NestedAnyof) {
         if let Some(Value::Object(params)) = parsed.remove("params") {
             for (k, v) in params {
                 parsed.insert(k, v);
@@ -381,10 +427,10 @@ impl BridgeToolContext {
             self.namespace_name_to_chat_name
                 .insert((ns.clone(), spec.name.clone()), chat_name.to_owned());
         }
-        if spec.kind == "custom" {
+        if spec.kind == ToolKind::Custom {
             self.custom_tool_names.insert(chat_name.to_owned());
         }
-        if spec.kind == "tool_search" {
+        if spec.kind == ToolKind::ToolSearch {
             self.tool_search_enabled = true;
         }
         self.chat_name_to_spec.insert(chat_name.to_owned(), spec);
@@ -501,19 +547,22 @@ impl BridgeToolContext {
         }
         self.registered_namespaces.insert(namespace.to_owned());
 
-        let strategy = namespace_tool
+        let raw_strategy = namespace_tool
             .get("strategy")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_ascii_lowercase)
             .unwrap_or_else(|| "flat".to_owned());
+        let strategy = NamespaceStrategy::from_str_or_flat(&raw_strategy);
 
-        if matches!(strategy.as_str(), "nested_oneof" | "nested_anyof") {
-            self.add_nested_namespace_tool(namespace, children, &strategy);
+        if strategy.is_nested() {
+            self.add_nested_namespace_tool(namespace, children, strategy);
             return;
         }
-        if strategy != "flat" {
-            tracing::warn!("Unrecognized namespace strategy {strategy:?}, falling back to flat");
+        if raw_strategy != "flat" {
+            tracing::warn!(
+                "Unrecognized namespace strategy {raw_strategy:?}, falling back to flat"
+            );
         }
         for child in children {
             if child.get("type").and_then(Value::as_str) == Some("function") {
@@ -524,13 +573,18 @@ impl BridgeToolContext {
 
     /// Build and register a single merged Chat tool for a nested namespace.
     /// Mirrors `_add_nested_namespace_tool` + `build_nested_namespace_chat_tool`.
-    fn add_nested_namespace_tool(&mut self, namespace: &str, children: &[Value], strategy: &str) {
+    fn add_nested_namespace_tool(
+        &mut self,
+        namespace: &str,
+        children: &[Value],
+        strategy: NamespaceStrategy,
+    ) {
         let (sub_tools, action_names) = collect_function_children(children);
         if sub_tools.is_empty() {
             return;
         }
         let chat_name = flatten_namespace_tool_name(namespace, namespace);
-        let schema = if strategy == "nested_oneof" {
+        let schema = if strategy == NamespaceStrategy::NestedOneof {
             build_oneof_schema(&sub_tools)
         } else {
             build_anyof_schema(&sub_tools, &action_names)
@@ -539,15 +593,18 @@ impl BridgeToolContext {
             "type": "function",
             "function": {
                 "name": chat_name,
-                "description": format!("Namespace tool: {namespace} (strategy: {strategy})"),
+                "description": format!(
+                    "Namespace tool: {namespace} (strategy: {})",
+                    strategy.as_str()
+                ),
                 "parameters": schema,
             },
         });
         let spec = ToolSpec {
-            kind: "namespace".to_owned(),
+            kind: ToolKind::Namespace,
             name: namespace.to_owned(),
             namespace: Some(namespace.to_owned()),
-            namespace_strategy: Some(strategy.to_owned()),
+            namespace_strategy: Some(strategy),
             actions: Some(action_names),
         };
         self.register_chat_tool(&chat_name, spec, chat_tool);
@@ -1013,10 +1070,10 @@ mod tests {
     #[test]
     fn nested_anyof_resolution_flattens_params() {
         let spec = ToolSpec {
-            kind: "namespace".to_owned(),
+            kind: ToolKind::Namespace,
             name: "db".to_owned(),
             namespace: Some("db".to_owned()),
-            namespace_strategy: Some("nested_anyof".to_owned()),
+            namespace_strategy: Some(NamespaceStrategy::NestedAnyof),
             actions: Some(vec!["read".to_owned()]),
         };
         let res =
@@ -1028,10 +1085,10 @@ mod tests {
     #[test]
     fn nested_resolution_unknown_action_is_none() {
         let spec = ToolSpec {
-            kind: "namespace".to_owned(),
+            kind: ToolKind::Namespace,
             name: "db".to_owned(),
             namespace: Some("db".to_owned()),
-            namespace_strategy: Some("nested_oneof".to_owned()),
+            namespace_strategy: Some(NamespaceStrategy::NestedOneof),
             actions: Some(vec!["read".to_owned()]),
         };
         let res = resolve_nested_namespace_arguments(&spec, r#"{"action":"delete"}"#);
