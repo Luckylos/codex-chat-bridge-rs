@@ -124,6 +124,13 @@ impl BridgeError {
         if let Self::UnsupportedInputItem { item_type, .. } = self {
             error["item_type"] = json!(item_type);
         }
+        // Mirror Python `_error_param`: the upstream/validation detail is
+        // rendered as a single sorted-key JSON *string* under `param` (not a
+        // structured `detail` object), so the wire envelope is byte-compatible
+        // with the Python bridge. A plain-string detail passes through verbatim;
+        // any other JSON value is serialized with sorted keys (serde_json's Map
+        // is BTreeMap here — `preserve_order` is off — so `to_string` already
+        // emits sorted keys, matching orjson OPT_SORT_KEYS).
         if let Self::InvalidRequest {
             detail: Some(d), ..
         }
@@ -131,7 +138,11 @@ impl BridgeError {
             detail: Some(d), ..
         } = self
         {
-            error["detail"] = d.clone();
+            let param = match d {
+                Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+            };
+            error["param"] = json!(param);
         }
         json!({ "error": error })
     }
@@ -163,7 +174,7 @@ mod tests {
         assert_eq!(env["error"]["message"], json!("bad n"));
         assert_eq!(env["error"]["type"], json!("invalid_request_error"));
         assert_eq!(env["error"]["code"], json!("n_not_supported"));
-        assert!(env["error"].get("detail").is_none());
+        assert!(env["error"].get("param").is_none());
     }
 
     #[test]
@@ -174,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_with_status_preserves_code_and_detail() {
+    fn upstream_with_status_preserves_code_and_param() {
         let detail = json!({ "error": { "message": "rate limited" } });
         let err = BridgeError::upstream_with_status(
             "rate limited",
@@ -183,7 +194,23 @@ mod tests {
             Some(detail.clone()),
         );
         assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(err.envelope()["error"]["detail"], detail);
+        // Mirrors Python `_error_param`: detail is rendered as a sorted-key
+        // JSON string under `param`, not a structured `detail` object.
+        assert_eq!(
+            err.envelope()["error"]["param"],
+            json!(r#"{"error":{"message":"rate limited"}}"#)
+        );
+    }
+
+    #[test]
+    fn upstream_string_detail_passes_through_as_param() {
+        let err = BridgeError::upstream_with_status(
+            "boom",
+            "upstream_request_failed",
+            500,
+            Some(json!("raw upstream text")),
+        );
+        assert_eq!(err.envelope()["error"]["param"], json!("raw upstream text"));
     }
 
     #[test]
