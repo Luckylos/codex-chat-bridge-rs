@@ -57,6 +57,15 @@ pub enum BridgeError {
     /// Request body exceeded the configured byte budget → 413.
     #[error("{message}")]
     RequestBodyTooLarge { message: String },
+    /// The concurrency queue wait timed out → 503. A bridge-local overload
+    /// signal (the permit never came free in time), distinct from an upstream
+    /// status: the client should retry later, so the render carries a
+    /// `Retry-After` hint.
+    #[error("{message}")]
+    Overloaded {
+        message: String,
+        retry_after_seconds: u64,
+    },
 }
 
 impl BridgeError {
@@ -100,6 +109,16 @@ impl BridgeError {
         }
     }
 
+    /// The concurrency queue wait elapsed without a free permit: shed the
+    /// request with 503 and a `Retry-After` hint rounded up from the wait.
+    pub fn overloaded(queue_timeout_seconds: f64) -> Self {
+        Self::Overloaded {
+            message: "Bridge at capacity: concurrency queue wait timed out. Retry shortly."
+                .to_owned(),
+            retry_after_seconds: queue_timeout_seconds.ceil().max(1.0) as u64,
+        }
+    }
+
     fn status(&self) -> StatusCode {
         match self {
             Self::InvalidRequest { .. } | Self::UnsupportedInputItem { .. } => {
@@ -109,6 +128,7 @@ impl BridgeError {
             Self::Stream { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::SessionNotFound { .. } => StatusCode::NOT_FOUND,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::Overloaded { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -121,6 +141,7 @@ impl BridgeError {
             Self::Stream { .. } => "stream_error",
             Self::SessionNotFound { .. } => "invalid_request_error",
             Self::RequestBodyTooLarge { .. } => "invalid_request_error",
+            Self::Overloaded { .. } => "overloaded_error",
         }
     }
 
@@ -133,6 +154,7 @@ impl BridgeError {
             Self::Stream { message, code } => (message, code),
             Self::SessionNotFound { message } => (message, "previous_response_not_found"),
             Self::RequestBodyTooLarge { message } => (message, "request_too_large"),
+            Self::Overloaded { message, .. } => (message, "overloaded"),
         };
         let mut error = json!({
             "message": message,
@@ -161,6 +183,21 @@ impl BridgeError {
 
 impl IntoResponse for BridgeError {
     fn into_response(self) -> Response {
+        // A 503 from queue shedding carries a `Retry-After` so a client (or the
+        // relay in front) can back off deterministically rather than hammering.
+        if let Self::Overloaded {
+            retry_after_seconds,
+            ..
+        } = &self
+        {
+            let retry_after = *retry_after_seconds;
+            let mut resp = (self.status(), Json(self.envelope())).into_response();
+            if let Ok(value) = axum::http::HeaderValue::from_str(&retry_after.to_string()) {
+                resp.headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+            return resp;
+        }
         (self.status(), Json(self.envelope())).into_response()
     }
 }
@@ -242,5 +279,45 @@ mod tests {
             err.envelope()["error"]["code"],
             json!("previous_response_not_found")
         );
+    }
+
+    #[test]
+    fn overloaded_renders_503_with_retry_after() {
+        // Queue shedding is a bridge-local overload signal: 503 with a
+        // Retry-After header and an `overloaded` code, distinct from any
+        // upstream status.
+        let err = BridgeError::overloaded(10.0);
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.error_type(), "overloaded_error");
+        assert_eq!(err.envelope()["error"]["code"], json!("overloaded"));
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("10"),
+        );
+    }
+
+    #[test]
+    fn overloaded_retry_after_rounds_up_and_floors_at_one() {
+        // A fractional timeout rounds up; a sub-second timeout still yields at
+        // least 1s so the header is never "0".
+        match BridgeError::overloaded(0.2) {
+            BridgeError::Overloaded {
+                retry_after_seconds,
+                ..
+            } => assert_eq!(retry_after_seconds, 1),
+            other => panic!("expected Overloaded, got {other:?}"),
+        }
+        match BridgeError::overloaded(2.4) {
+            BridgeError::Overloaded {
+                retry_after_seconds,
+                ..
+            } => assert_eq!(retry_after_seconds, 3),
+            other => panic!("expected Overloaded, got {other:?}"),
+        }
     }
 }

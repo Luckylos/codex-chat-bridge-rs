@@ -1037,4 +1037,67 @@ mod integration_tests {
         assert_eq!(b.unwrap(), StatusCode::OK);
         assert_eq!(MAX_SEEN.load(Ordering::SeqCst), 1);
     }
+
+    #[tokio::test]
+    async fn overload_sheds_with_503_when_queue_wait_times_out() {
+        // One permit plus a near-zero queue timeout: while a slow request holds
+        // the permit, a second request cannot acquire one before the wait
+        // elapses, so it is shed with 503 rather than queuing unboundedly.
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                Json(json!({ "id": "ok" }))
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+
+        let mut config = Config::for_test(&base);
+        config.max_concurrent_requests = 1;
+        config.queue_timeout_seconds = 0.05;
+        let concurrency = middleware::new_semaphore(config.max_concurrent_requests);
+        let state: SharedState = Arc::new(AppState {
+            upstream: Upstream::new(config.clone()),
+            upstream_reachable: AtomicBool::new(false),
+            upstream_checked: AtomicBool::new(false),
+            config,
+            concurrency,
+        });
+
+        let drive = |state: SharedState| {
+            tokio::spawn(async move {
+                let resp = build_app(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/chat/completions")
+                            .header("content-type", "application/json")
+                            .body(Body::from(valid_chat_body()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = resp.status();
+                let retry_after = resp
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                resp.into_body().collect().await.unwrap();
+                (status, retry_after)
+            })
+        };
+
+        // First request grabs the only permit and holds it for 200ms.
+        let first = drive(state.clone());
+        // Give it a moment to acquire before the second contends.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let second = drive(state.clone());
+
+        let (a, b) = tokio::join!(first, second);
+        assert_eq!(a.unwrap().0, StatusCode::OK);
+        let (shed_status, retry_after) = b.unwrap();
+        assert_eq!(shed_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry_after.as_deref(), Some("1"));
+    }
 }

@@ -59,11 +59,21 @@ impl SessionStore {
         }
     }
 
+    /// Lock the session map, recovering from a poisoned mutex instead of
+    /// propagating the panic. Every mutation here is a single statement over a
+    /// structurally-valid `BTreeMap`, so a thread that panicked mid-access left
+    /// the map intact; poisoning must not turn every subsequent request into a
+    /// panic which, under systemd `Restart=on-failure`, becomes a crash loop.
+    /// Mirrors the recovery idiom already used in `config.rs`.
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, StoredEntry>> {
+        self.sessions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Look up a session; expired entries are treated as missing. A live access
     /// renews the entry's TTL. The returned record is a clone, so the caller
     /// can mutate it freely without touching stored state.
     pub fn get(&self, response_id: &str) -> Option<SessionRecord> {
-        let mut sessions = self.sessions.lock().expect("session store mutex");
+        let mut sessions = self.lock();
         let now = Instant::now();
         let entry = sessions.get_mut(response_id)?;
         if now.duration_since(entry.last_accessed_at) > self.ttl {
@@ -78,7 +88,7 @@ impl SessionStore {
     /// plus cap enforcement. Stores a clone so later mutation of the passed
     /// record cannot reach into the store.
     pub fn save(&self, response_id: &str, record: SessionRecord) {
-        let mut sessions = self.sessions.lock().expect("session store mutex");
+        let mut sessions = self.lock();
         let now = Instant::now();
         sessions.insert(
             response_id.to_owned(),
@@ -121,7 +131,7 @@ impl SessionStore {
 
     #[cfg(test)]
     pub fn active_count(&self) -> usize {
-        self.sessions.lock().expect("session store mutex").len()
+        self.lock().len()
     }
 }
 
@@ -196,5 +206,31 @@ mod tests {
         // The stored copy is untouched.
         let again = store.get("resp_1").expect("record present");
         assert_eq!(again.messages.len(), 1);
+    }
+
+    #[test]
+    fn poisoned_mutex_recovers_instead_of_propagating_panic() {
+        // Simulate a thread panicking while holding the lock: the mutex is left
+        // poisoned. Subsequent access must recover the guard rather than panic —
+        // otherwise every later request would panic and, under systemd
+        // Restart=on-failure, turn into a crash loop.
+        use std::sync::Arc;
+
+        let store = Arc::new(SessionStore::new(DEFAULT_TTL, DEFAULT_MAX_SESSIONS));
+        store.save("resp_1", record("gpt-x"));
+
+        let poisoner = Arc::clone(&store);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner.lock();
+            panic!("poison the session mutex");
+        });
+        assert!(handle.join().is_err(), "the poisoning thread must panic");
+
+        // The map was structurally intact when the panic hit, so the stored
+        // record survives and access still works.
+        let got = store.get("resp_1").expect("record survives poisoning");
+        assert_eq!(got.model, "gpt-x");
+        store.save("resp_2", record("m"));
+        assert_eq!(store.active_count(), 2);
     }
 }

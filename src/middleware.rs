@@ -197,10 +197,19 @@ pub async fn concurrency_limit(
         return next.run(req).await;
     }
 
-    let permit = Arc::clone(&state.concurrency)
-        .acquire_owned()
-        .await
-        .expect("concurrency semaphore is never closed");
+    // Bounded wait: absorb a short burst, but shed sustained overload with 503
+    // rather than growing an unbounded backlog behind a slow upstream. The
+    // permit acquire itself never fails (the semaphore is never closed); only
+    // the timeout arm rejects.
+    let wait = std::time::Duration::from_secs_f64(state.config.queue_timeout_seconds);
+    let permit =
+        match tokio::time::timeout(wait, Arc::clone(&state.concurrency).acquire_owned()).await {
+            Ok(permit) => permit.expect("concurrency semaphore is never closed"),
+            Err(_) => {
+                metrics::inc_shed();
+                return BridgeError::overloaded(state.config.queue_timeout_seconds).into_response();
+            }
+        };
     metrics::inc_concurrency();
     let guard = ConcurrencyGuard { _permit: permit };
 

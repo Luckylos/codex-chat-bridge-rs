@@ -96,6 +96,11 @@ pub struct Config {
     pub upstream_streaming: bool,
     pub upstream_max_retries: u32,
     pub max_concurrent_requests: usize,
+    /// How long a request waits for a concurrency permit before the bridge
+    /// sheds it with 429. Bounds the queue so a slow upstream plus sustained
+    /// inflow cannot grow an unbounded backlog — a short burst is absorbed, a
+    /// persistent overload is rejected fast rather than piling up latency.
+    pub queue_timeout_seconds: f64,
     pub max_body_bytes: usize,
     pub unsupported_tool_policy: UnsupportedToolPolicy,
     // KNOWN PORTING GAP (not dead config): these three fields are the outbound
@@ -151,6 +156,17 @@ impl Config {
             ));
         }
 
+        let queue_timeout_seconds = f64_env("BRIDGE_QUEUE_TIMEOUT_SECONDS", 10.0)?;
+        if !queue_timeout_seconds.is_finite() || queue_timeout_seconds <= 0.0 {
+            return Err(ConfigError::new(
+                format!(
+                    "BRIDGE_QUEUE_TIMEOUT_SECONDS must be a finite number > 0, \
+                     got {queue_timeout_seconds}"
+                ),
+                "queue_timeout_invalid",
+            ));
+        }
+
         let max_body_bytes = usize_env("BRIDGE_MAX_BODY_BYTES", 10 * 1024 * 1024)?;
         if max_body_bytes < 1 {
             return Err(ConfigError::new(
@@ -168,6 +184,7 @@ impl Config {
             upstream_streaming: bool_env("BRIDGE_UPSTREAM_STREAMING", true),
             upstream_max_retries: u32_env("BRIDGE_UPSTREAM_MAX_RETRIES", 2)?,
             max_concurrent_requests,
+            queue_timeout_seconds,
             max_body_bytes,
             unsupported_tool_policy: UnsupportedToolPolicy::parse(&str_env(
                 "BRIDGE_UNSUPPORTED_TOOL_POLICY",
@@ -203,6 +220,7 @@ impl Config {
             upstream_streaming: false,
             upstream_max_retries: 2,
             max_concurrent_requests: 20,
+            queue_timeout_seconds: 10.0,
             max_body_bytes: 10 * 1024 * 1024,
             unsupported_tool_policy: UnsupportedToolPolicy::Ignore,
             upstream_tool_denylist: Vec::new(),

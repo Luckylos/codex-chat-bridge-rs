@@ -29,6 +29,9 @@ struct Metrics {
     // Count of U+FFFD replacements the streaming decoder emitted for invalid
     // upstream bytes, so silent stream corruption is observable.
     stream_decode_replacements_total: IntCounter,
+    // Requests shed with 503 because the concurrency-queue wait timed out, so
+    // sustained overload (vs. a healthy burst) is visible in the metrics.
+    requests_shed_total: IntCounter,
 }
 
 /// Request-duration buckets in milliseconds, matching the Python histogram.
@@ -111,6 +114,11 @@ fn metrics() -> &'static Metrics {
             "U+FFFD replacements emitted while decoding upstream stream bytes",
         )
         .expect("valid metric");
+        let requests_shed_total = IntCounter::new(
+            "bridge_requests_shed_total",
+            "Requests rejected with 503 after the concurrency-queue wait timed out",
+        )
+        .expect("valid metric");
 
         for collector in [
             Box::new(requests_total.clone()) as Box<dyn prometheus::core::Collector>,
@@ -122,6 +130,7 @@ fn metrics() -> &'static Metrics {
             Box::new(concurrency_usage.clone()),
             Box::new(transform_loss_total.clone()),
             Box::new(stream_decode_replacements_total.clone()),
+            Box::new(requests_shed_total.clone()),
         ] {
             registry.register(collector).expect("register");
         }
@@ -137,6 +146,7 @@ fn metrics() -> &'static Metrics {
             concurrency_usage,
             transform_loss_total,
             stream_decode_replacements_total,
+            requests_shed_total,
         }
     })
 }
@@ -171,6 +181,11 @@ pub fn inc_concurrency() {
 /// Decrement the concurrency-usage gauge.
 pub fn dec_concurrency() {
     metrics().concurrency_usage.dec();
+}
+
+/// Count a request shed with 503 because the concurrency-queue wait timed out.
+pub fn inc_shed() {
+    metrics().requests_shed_total.inc();
 }
 
 pub fn record_upstream_error(model: &str, status_code: &str) {
