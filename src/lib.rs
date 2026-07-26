@@ -640,6 +640,225 @@ mod integration_tests {
         assert_eq!(body["error"]["code"], json!("missing_model"));
     }
 
+    /// Drive a JSON request through the full app and return status + body.
+    async fn call_json(
+        state: SharedState,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = build_app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, parsed)
+    }
+
+    /// A mock upstream that returns one canned non-streaming completion.
+    fn canned_completion_upstream(finish_reason: &'static str) -> Router {
+        Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                Json(json!({
+                    "id": "up_1",
+                    "model": "upstream-model",
+                    "created": 999,
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "hello there" },
+                        "finish_reason": finish_reason,
+                    }],
+                    "usage": { "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3 },
+                }))
+            }),
+        )
+    }
+
+    // --- `/v1/responses` non-streaming handler orchestration ---
+    //
+    // The converters are unit-tested in `convert/`; these cover what only the
+    // handler can get wrong: request rejection rules, model resolution
+    // precedence, the session 404, and end-to-end envelope assembly.
+
+    #[tokio::test]
+    async fn responses_turn_converts_upstream_completion_end_to_end() {
+        let base = spawn_upstream(canned_completion_upstream("stop")).await;
+        let (status, body) = call_json(
+            test_state(&base),
+            "/v1/responses",
+            json!({ "model": "gpt-4o", "input": "hi", "temperature": 0.25 }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["object"], "response");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["output_text"], "hello there");
+        // Bridge-owned id, not the upstream's.
+        assert_ne!(body["id"], "up_1");
+        assert!(body["id"].as_str().unwrap().starts_with("resp"));
+        // Request echo flows through the handler into the response.
+        assert_eq!(body["temperature"], json!(0.25));
+    }
+
+    #[tokio::test]
+    async fn responses_rejects_n_greater_than_one() {
+        let (status, body) = call_json(
+            test_state("http://127.0.0.1:1"),
+            "/v1/responses",
+            json!({ "model": "gpt-4o", "input": "hi", "n": 2 }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "unsupported_n");
+    }
+
+    #[tokio::test]
+    async fn responses_requires_a_model() {
+        let (status, body) = call_json(
+            test_state("http://127.0.0.1:1"),
+            "/v1/responses",
+            json!({ "input": "hi" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "missing_model");
+    }
+
+    #[tokio::test]
+    async fn responses_blank_model_is_treated_as_missing() {
+        let (status, body) = call_json(
+            test_state("http://127.0.0.1:1"),
+            "/v1/responses",
+            json!({ "model": "   ", "input": "hi" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "missing_model");
+    }
+
+    #[tokio::test]
+    async fn responses_unknown_previous_response_id_is_404() {
+        let (status, _body) = call_json(
+            test_state("http://127.0.0.1:1"),
+            "/v1/responses",
+            json!({
+                "model": "gpt-4o",
+                "input": "hi",
+                "previous_response_id": "resp_bridge_does_not_exist",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn responses_continuation_reuses_the_stored_session_model() {
+        // Turn 1 persists the session under its bridge id; turn 2 supplies only
+        // `previous_response_id` and no model, so resolution must fall back to
+        // the stored model rather than 400.
+        let base = spawn_upstream(canned_completion_upstream("stop")).await;
+        let state = test_state(&base);
+
+        let (s1, first) = call_json(
+            state.clone(),
+            "/v1/responses",
+            json!({ "model": "gpt-4o", "input": "turn one" }),
+        )
+        .await;
+        assert_eq!(s1, StatusCode::OK);
+        let prior_id = first["id"].as_str().unwrap().to_owned();
+
+        let (s2, second) = call_json(
+            state,
+            "/v1/responses",
+            json!({ "input": "turn two", "previous_response_id": prior_id }),
+        )
+        .await;
+        assert_eq!(s2, StatusCode::OK, "continuation should resolve the model");
+        assert_eq!(second["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn responses_upstream_failure_surfaces_as_error_envelope() {
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": { "message": "bad key" } })),
+                )
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+        let (status, body) = call_json(
+            test_state(&base),
+            "/v1/responses",
+            json!({ "model": "gpt-4o", "input": "hi" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body["error"].is_object());
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_prometheus_text() {
+        let resp = build_app(test_state("http://127.0.0.1:1"))
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        // Prometheus exposition is line-oriented text, not JSON.
+        assert!(serde_json::from_slice::<serde_json::Value>(&bytes).is_err());
+    }
+
+    #[tokio::test]
+    async fn models_endpoint_passes_upstream_catalogue_through() {
+        let upstream = Router::new().route(
+            "/models",
+            get(|| async {
+                Json(json!({ "object": "list", "data": [{ "id": "m1" }, { "id": "m2" }] }))
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+        let resp = build_app(test_state(&base))
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["object"], "list");
+        assert_eq!(body["data"][1]["id"], "m2");
+    }
+
     #[tokio::test]
     async fn concurrency_limit_serializes_model_requests() {
         // A single permit forces the second request to wait for the first, so
