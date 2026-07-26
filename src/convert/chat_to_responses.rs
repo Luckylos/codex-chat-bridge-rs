@@ -439,4 +439,181 @@ mod tests {
         let items = chat_tool_calls_to_response_items(&msg, "", &ctx);
         assert_eq!(items[0]["name"], json!("unknown_tool"));
     }
+
+    // --- Top-level assembly (`chat_to_responses`) ---
+    //
+    // The tests above cover the part builders in isolation. These drive the
+    // public entrypoint that `lib.rs` calls on the non-streaming
+    // `/v1/responses` path, so they pin the things only assembly can get
+    // wrong: output-item ORDER, the always-present echo-field shape, and the
+    // status/usage/model derivations.
+
+    fn convert(chat: Value, original: Option<Value>) -> Value {
+        let ctx = crate::context::BridgeToolContext::new();
+        let original = original.map(|v| v.as_object().unwrap().clone());
+        chat_to_responses(&chat, "fallback-model", original.as_ref(), "resp_1", &ctx)
+    }
+
+    #[test]
+    fn assembles_output_items_in_reasoning_message_tool_order() {
+        // Order is protocol-visible: clients replay `output` as the turn's
+        // item sequence, so reasoning must precede the message, which must
+        // precede tool calls.
+        let out = convert(
+            json!({
+                "choices": [{
+                    "message": {
+                        "reasoning_content": "why",
+                        "content": "answer",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "function": { "name": "do_it", "arguments": "{}" }
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }]
+            }),
+            None,
+        );
+
+        let types: Vec<&str> = out["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(types, ["reasoning", "message", "function_call"]);
+    }
+
+    #[test]
+    fn omits_absent_sections_without_leaving_holes() {
+        // No reasoning and no tool calls: `output` holds only the message,
+        // rather than nulls or empty placeholders.
+        let out = convert(
+            json!({ "choices": [{ "message": { "content": "just text" } }] }),
+            None,
+        );
+
+        let items = out["output"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(out["output_text"], "just text");
+    }
+
+    #[test]
+    fn always_emits_every_echo_field_even_when_request_is_absent() {
+        // Python's Pydantic model serialized the full field set; codex-tui
+        // relies on that stable shape. Absent fields must be present-and-null,
+        // not missing keys.
+        let out = convert(
+            json!({ "choices": [{ "message": { "content": "x" } }] }),
+            None,
+        );
+
+        for &key in REQUEST_ECHO_FIELDS {
+            assert!(
+                out.get(key).is_some(),
+                "echo field {key} must be present (as null) even with no request"
+            );
+            assert!(
+                out[key].is_null(),
+                "echo field {key} should default to null"
+            );
+        }
+    }
+
+    #[test]
+    fn echoes_request_fields_over_the_null_seed() {
+        let out = convert(
+            json!({ "choices": [{ "message": { "content": "x" } }] }),
+            Some(json!({
+                "temperature": 0.5,
+                "instructions": "be brief",
+                "metadata": { "k": "v" },
+            })),
+        );
+
+        assert_eq!(out["temperature"], json!(0.5));
+        assert_eq!(out["instructions"], json!("be brief"));
+        assert_eq!(out["metadata"], json!({ "k": "v" }));
+        // Unsent echo fields stay null rather than being dropped.
+        assert!(out["top_p"].is_null());
+    }
+
+    #[test]
+    fn derives_envelope_from_chat_body_with_model_fallback() {
+        let out = convert(
+            json!({
+                "created": 1234,
+                "usage": { "prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7 },
+                "choices": [{ "message": { "content": "x" }, "finish_reason": "stop" }],
+            }),
+            None,
+        );
+
+        assert_eq!(out["id"], "resp_1");
+        assert_eq!(out["object"], "response");
+        assert_eq!(out["status"], "completed");
+        assert_eq!(out["created_at"], json!(1234));
+        assert_eq!(out["usage"]["input_tokens"], json!(3));
+        assert_eq!(out["usage"]["output_tokens"], json!(4));
+        assert_eq!(out["usage"]["total_tokens"], json!(7));
+        assert!(out["incomplete_details"].is_null());
+        // No `model` in the chat body → the caller's fallback is used.
+        assert_eq!(out["model"], "fallback-model");
+    }
+
+    #[test]
+    fn upstream_model_wins_over_fallback() {
+        let out = convert(
+            json!({
+                "model": "actual-model",
+                "choices": [{ "message": { "content": "x" } }],
+            }),
+            None,
+        );
+        assert_eq!(out["model"], "actual-model");
+    }
+
+    #[test]
+    fn length_finish_reason_marks_response_incomplete() {
+        let out = convert(
+            json!({
+                "choices": [{ "message": { "content": "truncated" }, "finish_reason": "length" }]
+            }),
+            None,
+        );
+
+        assert_eq!(out["status"], "incomplete");
+        assert_eq!(out["incomplete_details"]["reason"], "max_output_tokens");
+    }
+
+    #[test]
+    fn malformed_chat_body_yields_a_well_formed_empty_response() {
+        // A body with no choices must still produce a valid Responses object —
+        // the handler returns this straight to the client.
+        let out = convert(json!({}), None);
+
+        assert_eq!(out["id"], "resp_1");
+        assert_eq!(out["object"], "response");
+        assert_eq!(out["output"], json!([]));
+        assert_eq!(out["output_text"], "");
+        assert!(out["created_at"].is_null());
+    }
+
+    #[test]
+    fn item_ids_are_derived_from_the_response_id() {
+        // The streaming path emits the same ids for the same response id; if
+        // these drift, a client correlating stream and non-stream turns breaks.
+        let out = convert(
+            json!({
+                "choices": [{ "message": { "reasoning_content": "r", "content": "c" } }]
+            }),
+            None,
+        );
+
+        let items = out["output"].as_array().unwrap();
+        assert_eq!(items[0]["id"], json!(id_gen::reasoning_item_id("resp_1")));
+        assert_eq!(items[1]["id"], json!(id_gen::message_item_id("resp_1")));
+    }
 }
