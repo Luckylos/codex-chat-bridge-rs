@@ -1,7 +1,13 @@
 [Unit]
-Description=Codex Chat Bridge (Rust)
+Description=Codex Chat Bridge
 After=network-online.target
 Wants=network-online.target
+# Crash-loop brake: if the process fails 5 times within 60s, stop restarting
+# and enter `failed` so the fault surfaces to monitoring instead of the unit
+# restarting forever every RestartSec. Without this, a poison-pill request or a
+# bad deploy would spin at 3s intervals indefinitely.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,9 +15,54 @@ WorkingDirectory=/opt/codex-chat-bridge-rs
 EnvironmentFile=/opt/codex-chat-bridge/secrets.env
 Environment=BRIDGE_HOST=0.0.0.0
 Environment=BRIDGE_PORT=18090
-ExecStart=/opt/codex-chat-bridge-rs/bin/codex-chat-bridge
+ExecStart=/opt/codex-chat-bridge-rs/target/release/codex-chat-bridge
 Restart=on-failure
 RestartSec=3
+# When the crash-loop brake (StartLimitBurst above) trips, the unit enters
+# `failed` and stops restarting on its own. Keep the action at `none` so systemd
+# does NOT escalate to rebooting the host — a bad deploy of this one service
+# must never take the box down.
+StartLimitAction=none
+
+# --- Resource ceilings: contain a leak or a runaway to this service, not the box.
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=512
+LimitNOFILE=65536
+
+# --- Filesystem sandbox: the bridge holds all state in memory and writes no
+# files, so the entire filesystem can be read-only with private tmp/home. A
+# compromise or bug cannot persist anything.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=
+
+# --- Privilege sandbox: never needs elevated capabilities (listens on a high
+# port), so drop the lot and forbid regaining any.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# NOTE: WatchdogSec is deliberately NOT set. The process has no sd_notify
+# heartbeat, so a watchdog would kill a perfectly healthy service on the first
+# interval and manufacture the very crash loop the StartLimit above guards
+# against. Add WatchdogSec only alongside sd_notify(WATCHDOG=1) pings.
 
 [Install]
 WantedBy=multi-user.target
