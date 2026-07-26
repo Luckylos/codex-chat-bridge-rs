@@ -1,10 +1,11 @@
 //! codex-chat-bridge (Rust) — entry point and HTTP surface.
 //!
-//! Phase 0 scaffold: process startup, config load + upstream connectivity
-//! probe, and the read-only endpoints (`/health`, `/metrics`, `/v1/models`).
-//! The `/v1/responses` conversion pipeline and `/v1/chat/completions` relay
-//! land in later phases; their routes are registered now returning 501 so the
-//! external surface shape is stable from the start.
+//! Owns process startup, config load + upstream connectivity probe, and the
+//! full HTTP surface: read-only `/health`, `/metrics`, `/v1/models`; the
+//! `/v1/responses` (+ `/v1/responses/compact`) Responses→Chat conversion
+//! pipeline; and the `/v1/chat/completions` relay. All logic lives in this
+//! library crate so integration tests, doc-tests, and benches link the same
+//! code the binary runs.
 
 mod compat;
 mod config;
