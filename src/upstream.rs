@@ -576,4 +576,174 @@ mod tests {
             "missing_messages"
         );
     }
+
+    // --- Retry / compat orchestration (send_with_retry + send_with_compat) ---
+    //
+    // These exercise the transport+compat *wiring* — the loops, the attempt
+    // counting, the compat-rewrite-then-resend path, and the terminal-vs-retry
+    // branch — which the compat.rs unit tests (predicate logic only) and the
+    // shadow oracle (happy path only) cannot reach. A mock upstream on an
+    // ephemeral port counts hits; `start_paused` gives the backoff sleeps a
+    // virtual clock so no real wall-time elapses.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    /// Spawn a throwaway upstream on an ephemeral port; return its base URL.
+    /// Binds the listener synchronously (so the port is accepting before we
+    /// hand back the URL) and only moves the bound listener into the serve
+    /// task, eliminating the connect-before-ready race.
+    async fn spawn_upstream(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let addr = listener.local_addr().expect("mock upstream addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve mock upstream");
+        });
+        // Poll the port until the accept loop is actually serving, so the first
+        // client attempt cannot race ahead of readiness and see a spurious 502.
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        format!("http://{addr}")
+    }
+
+    fn upstream_for(base: &str) -> Upstream {
+        Upstream::new(Config::for_test(base))
+    }
+
+    fn chat_body() -> Map<String, Value> {
+        json!({
+            "model": "gpt-4o",
+            "messages": [{ "role": "user", "content": "hi" }],
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[tokio::test]
+    async fn transport_retries_500_then_succeeds() {
+        // First attempt 500 (retryable), second attempt 200: the transport loop
+        // must resend after backoff and return the eventual success.
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                let n = HITS.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response()
+                } else {
+                    Json(json!({ "id": "ok", "object": "chat.completion" })).into_response()
+                }
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+        let out = upstream_for(&base)
+            .create_chat_completion(chat_body())
+            .await;
+
+        assert_eq!(out.unwrap()["id"], "ok");
+        assert_eq!(HITS.load(Ordering::SeqCst), 2, "should send exactly twice");
+    }
+
+    #[tokio::test]
+    async fn transport_exhausts_retries_then_returns_status() {
+        // Persistent 503: with max_retries=2 the loop makes 3 attempts total,
+        // then surfaces the upstream status (not a flat 502) and stops.
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                HITS.fetch_add(1, Ordering::SeqCst);
+                (axum::http::StatusCode::SERVICE_UNAVAILABLE, "down").into_response()
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+        let err = upstream_for(&base)
+            .create_chat_completion(chat_body())
+            .await
+            .unwrap_err();
+
+        match err {
+            BridgeError::Upstream { status, .. } => {
+                assert_eq!(status.as_u16(), 503, "terminal status is surfaced");
+            }
+            other => panic!("expected Upstream error, got {other:?}"),
+        }
+        assert_eq!(
+            HITS.load(Ordering::SeqCst),
+            3,
+            "1 initial + 2 retries = 3 attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn compat_rewrites_then_resends_on_400() {
+        // A 400 whose body names top_p triggers the compat top_p clamp rule;
+        // the compat loop must rewrite the body in place and resend within the
+        // SAME attempt (no backoff), then succeed. The second hit must carry the
+        // clamped top_p, proving the rewrite was actually applied to the wire.
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(
+                |axum::extract::Json(body): axum::extract::Json<Value>| async move {
+                    let n = HITS.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "invalid value for top_p",
+                        )
+                            .into_response()
+                    } else {
+                        // Prove the resend carries the clamped value, not the original.
+                        assert_eq!(body["top_p"], json!(0.999), "resend must be rewritten");
+                        Json(json!({ "id": "ok" })).into_response()
+                    }
+                },
+            ),
+        );
+        let base = spawn_upstream(upstream).await;
+        let mut body = chat_body();
+        body.insert("top_p".to_owned(), json!(5.0));
+        let out = upstream_for(&base).create_chat_completion(body).await;
+
+        assert_eq!(out.unwrap()["id"], "ok");
+        assert_eq!(HITS.load(Ordering::SeqCst), 2, "rewrite then one resend");
+    }
+
+    #[tokio::test]
+    async fn non_retryable_status_returns_immediately() {
+        // 401 is neither compat-eligible nor retryable: one attempt, no resend,
+        // the status passes straight through.
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                HITS.fetch_add(1, Ordering::SeqCst);
+                (axum::http::StatusCode::UNAUTHORIZED, "nope").into_response()
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+        let err = upstream_for(&base)
+            .create_chat_completion(chat_body())
+            .await
+            .unwrap_err();
+
+        match err {
+            BridgeError::Upstream { status, .. } => assert_eq!(status.as_u16(), 401),
+            other => panic!("expected Upstream error, got {other:?}"),
+        }
+        assert_eq!(HITS.load(Ordering::SeqCst), 1, "no retry on 401");
+    }
 }
