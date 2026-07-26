@@ -621,6 +621,18 @@ mod tests {
         Upstream::new(Config::for_test(base))
     }
 
+    /// An upstream with an explicit retry budget. Network-fault tests use `0`
+    /// so they assert the terminal mapping without paying the backoff sleep.
+    fn upstream_with_retries(base: &str, max_retries: u32) -> Upstream {
+        let mut config = Config::for_test(base);
+        config.upstream_max_retries = max_retries;
+        Upstream::new(config)
+    }
+
+    /// A port that nothing listens on, so a request fails at connect time —
+    /// a real transport fault rather than an HTTP error status.
+    const DEAD_UPSTREAM: &str = "http://127.0.0.1:1";
+
     fn chat_body() -> Map<String, Value> {
         json!({
             "model": "gpt-4o",
@@ -720,6 +732,79 @@ mod tests {
 
         assert_eq!(out.unwrap()["id"], "ok");
         assert_eq!(HITS.load(Ordering::SeqCst), 2, "rewrite then one resend");
+    }
+
+    // --- Transport faults (connect-time failures, not HTTP error statuses) ---
+    //
+    // The status-code retry paths are covered above. These cover the `Err(net)`
+    // arm: a request that never gets an HTTP response at all, which is what an
+    // upstream outage or connection reset actually looks like.
+
+    #[tokio::test]
+    async fn network_fault_maps_to_upstream_error() {
+        let err = upstream_with_retries(DEAD_UPSTREAM, 0)
+            .create_chat_completion(chat_body())
+            .await
+            .expect_err("connect to a dead port must fail");
+
+        match err {
+            BridgeError::Upstream { code, .. } => {
+                assert_eq!(code, "upstream_network_error");
+            }
+            other => panic!("expected an upstream error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn network_fault_is_retried_before_giving_up() {
+        // With one retry the loop must make two attempts and still surface the
+        // terminal network error rather than hanging or panicking.
+        let err = upstream_with_retries(DEAD_UPSTREAM, 1)
+            .create_chat_completion(chat_body())
+            .await
+            .expect_err("dead port must still fail after retrying");
+
+        assert!(matches!(err, BridgeError::Upstream { .. }));
+    }
+
+    #[tokio::test]
+    async fn relay_network_fault_maps_to_relay_failed() {
+        // The relay path has its own `Err(net)` arm with a distinct code, so a
+        // regression that crossed the two wouldn't be caught by the test above.
+        let err = upstream_with_retries(DEAD_UPSTREAM, 0)
+            .relay_chat_completion(chat_body())
+            .await
+            .expect_err("relay to a dead port must fail");
+
+        match err {
+            BridgeError::Upstream { code, .. } => {
+                assert_eq!(code, "upstream_relay_failed");
+            }
+            other => panic!("expected an upstream error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_network_fault_maps_to_upstream_error() {
+        // The success arm is an opaque `impl Stream` (no `Debug`), so match
+        // rather than `expect_err`.
+        match upstream_with_retries(DEAD_UPSTREAM, 0)
+            .create_chat_completion_stream(chat_body())
+            .await
+        {
+            Ok(_) => panic!("streaming from a dead port must fail"),
+            Err(err) => assert!(matches!(err, BridgeError::Upstream { .. })),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_network_fault_is_an_upstream_error() {
+        let err = upstream_with_retries(DEAD_UPSTREAM, 0)
+            .list_models()
+            .await
+            .expect_err("listing models from a dead port must fail");
+
+        assert!(matches!(err, BridgeError::Upstream { .. }));
     }
 
     #[tokio::test]
