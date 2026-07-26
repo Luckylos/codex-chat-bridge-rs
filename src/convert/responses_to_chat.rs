@@ -199,7 +199,7 @@ fn append_input_items(
     loss: &mut TransformLossCollector,
     tool_context: &crate::context::BridgeToolContext,
 ) {
-    let items = iter_request_input_items(payload);
+    let items = crate::context::iter_request_input_items(payload.input.as_ref());
     let mut pending_tool_calls: Vec<Value> = Vec::new();
     let mut pending_reasoning: Option<String> = None;
     // Call ids already present in the (possibly session-restored) history, so a
@@ -578,20 +578,6 @@ fn build_generic_message(
     }
     m.into_value()
 }
-fn iter_request_input_items(payload: &ResponsesRequest) -> Vec<Value> {
-    match &payload.input {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::String(s)) => vec![json!({ "type": "input_text", "text": s })],
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|item| match item {
-                Value::String(s) => json!({ "type": "input_text", "text": s }),
-                other => other.clone(),
-            })
-            .collect(),
-        Some(other) => vec![other.clone()],
-    }
-}
 fn is_openai_o_series(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     // o1 / o3 / o4 families use max_completion_tokens.
@@ -671,20 +657,20 @@ mod tests {
     #[test]
     fn iter_request_input_items_string_wraps_as_input_text() {
         let payload = req_with_input(json!("hi"));
-        let items = iter_request_input_items(&payload);
+        let items = crate::context::iter_request_input_items(payload.input.as_ref());
         assert_eq!(items, vec![json!({ "type": "input_text", "text": "hi" })]);
     }
     #[test]
     fn iter_request_input_items_array_lifts_bare_strings() {
         let payload = req_with_input(json!(["a", { "type": "message", "role": "user" }]));
-        let items = iter_request_input_items(&payload);
+        let items = crate::context::iter_request_input_items(payload.input.as_ref());
         assert_eq!(items[0], json!({ "type": "input_text", "text": "a" }));
         assert_eq!(items[1], json!({ "type": "message", "role": "user" }));
     }
     #[test]
     fn iter_request_input_items_none_is_empty() {
         let payload = req_with_input(Value::Null);
-        assert!(iter_request_input_items(&payload).is_empty());
+        assert!(crate::context::iter_request_input_items(payload.input.as_ref()).is_empty());
     }
     /// Run `append_input_items` for the given `input` and return the messages.
     fn build_messages(input: Value) -> Vec<Value> {

@@ -760,8 +760,9 @@ pub fn build_tool_context_from_request(
 }
 
 /// Normalize a request `input` into a flat list of items, wrapping bare strings
-/// as `input_text` parts.
-fn iter_request_input_items(input: Option<&Value>) -> Vec<Value> {
+/// as `input_text` parts. Single source of truth shared with the
+/// responses→chat converter so the same normalization can never diverge.
+pub(crate) fn iter_request_input_items(input: Option<&Value>) -> Vec<Value> {
     match input {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::String(s)) => vec![json!({ "type": "input_text", "text": s })],
