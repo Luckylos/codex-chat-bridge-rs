@@ -859,6 +859,135 @@ mod integration_tests {
         assert_eq!(body["data"][1]["id"], "m2");
     }
 
+    /// State whose upstream is asked to stream, matching the production default
+    /// (`BRIDGE_UPSTREAM_STREAMING=true`). `Config::for_test` defaults it off,
+    /// so the streaming branch needs this explicitly.
+    fn streaming_state(upstream_base_url: &str) -> SharedState {
+        let mut config = Config::for_test(upstream_base_url);
+        config.upstream_streaming = true;
+        let concurrency = middleware::new_semaphore(config.max_concurrent_requests);
+        Arc::new(AppState {
+            upstream: Upstream::new(config.clone()),
+            upstream_reachable: AtomicBool::new(false),
+            upstream_checked: AtomicBool::new(false),
+            config,
+            concurrency,
+        })
+    }
+
+    /// Collect an SSE response body into `(status, content_type, raw_text)`.
+    async fn call_sse(state: SharedState, body: serde_json::Value) -> (StatusCode, String, String) {
+        let resp = build_app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, ctype, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Pull the ordered `event:` names out of an SSE payload.
+    fn sse_event_names(raw: &str) -> Vec<&str> {
+        raw.lines()
+            .filter_map(|l| l.strip_prefix("event: "))
+            .collect()
+    }
+
+    // --- Streaming `/v1/responses` (both upstream modes) ---
+    //
+    // This is the hot path in production and has two distinct branches inside
+    // `create_response_streaming`: incremental conversion of an upstream SSE
+    // stream, and buffer-then-burst when the upstream is non-streaming. Both
+    // must produce a well-formed Responses event sequence.
+
+    #[tokio::test]
+    async fn streaming_responses_converts_upstream_sse_incrementally() {
+        // Upstream emits Chat Completions SSE deltas; the bridge must convert
+        // them into an ordered Responses event sequence.
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                let sse = concat!(
+                    "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n",
+                    "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                    "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    sse,
+                )
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+        let (status, ctype, raw) = call_sse(
+            streaming_state(&base),
+            json!({ "model": "gpt-4o", "input": "hi", "stream": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(ctype.starts_with("text/event-stream"), "got {ctype:?}");
+
+        let names = sse_event_names(&raw);
+        assert_eq!(names.first(), Some(&"response.created"));
+        assert_eq!(names.last(), Some(&"response.completed"));
+        assert!(
+            names.contains(&"response.output_text.delta"),
+            "expected text deltas, got {names:?}"
+        );
+        // The streamed deltas reassemble into the full assistant text.
+        assert!(raw.contains("Hel") && raw.contains("lo"));
+    }
+
+    #[tokio::test]
+    async fn streaming_responses_buffers_when_upstream_is_non_streaming() {
+        // With `upstream_streaming = false` the bridge buffers the completion
+        // and renders it as one burst of SSE events — still a valid sequence.
+        let base = spawn_upstream(canned_completion_upstream("stop")).await;
+        let (status, ctype, raw) = call_sse(
+            test_state(&base), // for_test leaves upstream_streaming = false
+            json!({ "model": "gpt-4o", "input": "hi", "stream": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(ctype.starts_with("text/event-stream"));
+
+        let names = sse_event_names(&raw);
+        assert_eq!(names.first(), Some(&"response.created"));
+        assert_eq!(names.last(), Some(&"response.completed"));
+        assert!(raw.contains("hello there"));
+    }
+
+    #[tokio::test]
+    async fn streaming_rejects_bad_request_before_opening_the_stream() {
+        // Validation errors must surface as a normal JSON error response, not
+        // as a 200 event-stream carrying an error event.
+        let (status, body) = call_json(
+            test_state("http://127.0.0.1:1"),
+            "/v1/responses",
+            json!({ "input": "hi", "stream": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "missing_model");
+    }
+
     #[tokio::test]
     async fn concurrency_limit_serializes_model_requests() {
         // A single permit forces the second request to wait for the first, so
