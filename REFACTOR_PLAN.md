@@ -2,6 +2,26 @@
 
 Date: 2026-07-25. Supersedes the prior "surgical, Python-parity-anchored" plan.
 
+> **Status (2026-07-26 re-audit): this plan is closed out.** Kept as a decision
+> record, not a live task list. Per-phase outcome:
+>
+> | Phase | Outcome | Evidence |
+> |-------|---------|----------|
+> | 0 — freeze oracle + lib/bin split | done | lib + bin crate, golden fixtures committed |
+> | 1 — typed id newtypes | **dropped** (see below) | no prefix scattering, no misuse surface |
+> | 2 — interior protocol enums | done, different layout | `protocol.rs`: `InputItemKind`, `ToolCallKind`, `ContentPartType` (flat module, not `domain/`) |
+> | 3 — split convert by direction | done | `convert/{responses_to_chat,chat_to_responses,semantics,message_normalization,tool_arguments}.rs` |
+> | 4 — thiserror error type | done | `error.rs` with `#[derive(thiserror::Error)]` |
+> | 5 — ToolSpec discriminants → enums | done, different layout | `ToolKind` in `context.rs` (no `tools/` dir) |
+> | 6 — stream_tools re-lookup cleanup | done | `read_state` / `modify_state` / `with_ctx_state_mut` |
+> | 7 — sweep + polish | done | module-level `dead_code` allows removed; provenance comments replaced |
+>
+> Where the delivered layout differs from the plan (Phases 2 and 5 landed as flat
+> modules rather than `domain/` and `tools/` directories), the structural goal —
+> exhaustive typed dispatch, single ownership per concern — is met; a directory
+> level for 3 enums and one enum respectively would be indirection without
+> benefit at this crate size.
+
 ## Directive
 
 Refactor to the **best possible idiomatic-Rust state**, as if this were a fresh
@@ -107,11 +127,30 @@ benches/            # criterion micro-benches on the hot transform path (new)
   `tests/`. This alone is a large idiomatic win (doc-tests, benches, faster
   incremental test builds).
 
-### Phase 1 — Typed ids (domain/ids.rs)
-- `ResponseId`, `CallId`, `ItemId` newtypes; prefix logic (`resp_bridge_`, `fc_`,
-  `ctc_`, `rs_`, `msg_`) encapsulated as the newtypes' only concern.
-- `Display`/`AsRef<str>`; ban raw `format!("fc_{}")` scattering.
-- Wire output identical (same rendered strings) → oracle proves it.
+### Phase 1 — Typed ids (domain/ids.rs) — **NOT DONE, deliberately dropped**
+
+Original intent: `ResponseId`/`CallId`/`ItemId` newtypes encapsulating the
+prefix logic (`resp_bridge_`, `fc_`, `ctc_`, `rs_`, `msg_`), banning raw
+`format!("fc_{}")` scattering.
+
+**Verdict (2026-07-26 re-audit): dropped as pure type-safety churn.** The two
+problems newtypes would solve do not exist in this codebase:
+
+1. **No scattering to ban.** `format!` with an id prefix appears in
+   **zero** sites outside `id_gen.rs`. Prefix logic is already encapsulated at
+   a single point — the stated goal is already met, by module boundary instead
+   of by type.
+2. **No misuse surface to close.** No function signature takes two `&str` id
+   parameters, so the error a newtype prevents (passing a `call_id` where a
+   `response_id` is expected) is not physically expressible today.
+
+Cost would be 3 new types, ~11 signature changes, all call sites and tests
+rewritten; benefit is zero catchable defects. This is the same call Phase 2's
+DESIGN OVERRIDE already made: **types where we branch, plain values where we
+pass through.** Phase 1 lands on the "pass through" side.
+
+Revisit only if a future change introduces same-typed adjacent id parameters
+or a second id-minting site.
 
 ### Phase 2 — Interior protocol enums (protocol.rs) — the big one
 - Replace the stringly-typed `get("type").as_str()` dispatch sites with typed
