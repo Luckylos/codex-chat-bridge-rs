@@ -7,7 +7,11 @@
 //!   it yields depends only on the byte stream, never on where that stream was
 //!   split into chunks; and it agrees with `String::from_utf8_lossy`;
 //! * the SSE codec **round-trips** — serializing an event then extracting and
-//!   parsing the frame recovers the event name and the JSON data value.
+//!   parsing the frame recovers the event name and the JSON data value;
+//! * the two conversion entrypoints are **total** — for *any* upstream JSON,
+//!   however malformed or deeply nested, they neither panic nor produce a
+//!   structurally-invalid result. This matters because the converters consume
+//!   untrusted upstream bytes on the hot path, where a panic is a DoS.
 //!
 //! Invariants are deliberately self-referential (decoder-vs-itself, codec
 //! round-trip) rather than pinned to a second implementation, so they keep
@@ -17,8 +21,70 @@
 use proptest::prelude::*;
 use serde_json::{json, Value};
 
+use crate::context::BridgeToolContext;
+use crate::convert::{chat_to_responses, responses_to_chat_with_session};
 use crate::sse::{extract_block, parse_sse_block, serialize_event};
 use crate::stream_chat_to_responses::Utf8StreamDecoder;
+use crate::types::ResponsesRequest;
+
+/// A recursive strategy for arbitrary JSON, bounded in depth and breadth so the
+/// runs stay fast while still generating the shapes the converters branch on:
+/// nulls, every scalar, and nested objects/arrays. Object keys are drawn from a
+/// small alphabet plus a few protocol-significant names (`type`, `role`,
+/// `content`, `tool_calls`, ...) so the fuzzer actually lands on the dispatch
+/// arms rather than only on unrecognized keys.
+fn arb_json() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::from),
+        any::<i64>().prop_map(Value::from),
+        prop_oneof![
+            "[a-z]{1,6}",
+            Just("type".to_owned()),
+            Just("role".to_owned()),
+            Just("content".to_owned()),
+            Just("text".to_owned()),
+            Just("tool_calls".to_owned()),
+            Just("input_text".to_owned()),
+            Just("function_call".to_owned()),
+            Just("input_image".to_owned()),
+        ]
+        .prop_map(Value::from),
+    ];
+    leaf.prop_recursive(4, 32, 6, |inner| {
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+            proptest::collection::hash_map(
+                prop_oneof![
+                    "[a-z]{1,6}",
+                    Just("type".to_owned()),
+                    Just("role".to_owned()),
+                    Just("content".to_owned()),
+                    Just("tool_calls".to_owned()),
+                    Just("arguments".to_owned()),
+                ],
+                inner,
+                0..6,
+            )
+            .prop_map(|m| Value::Object(m.into_iter().collect())),
+        ]
+    })
+}
+
+/// Structural validity of a `chat_to_responses` result: it is always an object
+/// carrying the fixed Responses envelope, whatever the upstream body was.
+fn assert_valid_response_object(v: &Value) {
+    let obj = v.as_object().expect("response is a JSON object");
+    assert_eq!(obj.get("object"), Some(&json!("response")));
+    assert!(
+        obj.get("output").is_some_and(Value::is_array),
+        "output is an array"
+    );
+    assert!(
+        obj.get("status").is_some_and(Value::is_string),
+        "status is a string"
+    );
+}
 
 /// Feed `data` to a fresh decoder in the given `chunk_sizes`, then finalize.
 /// Sizes that overrun the remaining bytes are clamped, and any leftover tail is
@@ -113,5 +179,49 @@ proptest! {
         let (frame, rest) = extract_block(&buffer).expect("delimiter present");
         prop_assert_eq!(&frame, &head);
         prop_assert_eq!(rest, tail.replace("\r\n", "\n"));
+    }
+
+    /// `chat_to_responses` is total over upstream bodies: any JSON — a bare
+    /// scalar, an array, an object with garbage `choices`/`message` shapes —
+    /// converts without panicking and yields a structurally-valid Responses
+    /// object. This machine-proves the invariant the hand audit of the
+    /// `.expect`/`.unwrap` sites can only argue informally.
+    #[test]
+    fn chat_to_responses_never_panics_on_arbitrary_upstream(chat in arb_json()) {
+        let ctx = BridgeToolContext::new();
+        let out = chat_to_responses(&chat, "fallback", None, "resp_prop", &ctx);
+        assert_valid_response_object(&out);
+    }
+
+    /// The same totality guarantee with the request-echo path engaged: an
+    /// arbitrary `original_request` map must not change the no-panic /
+    /// valid-shape outcome.
+    #[test]
+    fn chat_to_responses_never_panics_with_echo(
+        chat in arb_json(),
+        echo in arb_json(),
+    ) {
+        let ctx = BridgeToolContext::new();
+        let echo_map = echo.as_object().cloned();
+        let out = chat_to_responses(&chat, "fallback", echo_map.as_ref(), "resp_prop", &ctx);
+        assert_valid_response_object(&out);
+    }
+
+    /// `responses_to_chat_with_session` is total over inbound requests: any
+    /// JSON that deserializes into a `ResponsesRequest` (all fields default, so
+    /// most shapes do) converts without panicking and yields a Chat body whose
+    /// `messages` is an array. Undeserializable inputs are out of scope — the
+    /// HTTP layer rejects those as 400 before this function is reached.
+    #[test]
+    fn responses_to_chat_never_panics_on_arbitrary_input(input in arb_json()) {
+        let Ok(payload) = serde_json::from_value::<ResponsesRequest>(input) else {
+            return Ok(());
+        };
+        let ctx = BridgeToolContext::new();
+        let chat = responses_to_chat_with_session(&payload, "m", None, &ctx);
+        prop_assert!(
+            chat.body.get("messages").is_some_and(Value::is_array),
+            "converted chat body always carries a messages array"
+        );
     }
 }
