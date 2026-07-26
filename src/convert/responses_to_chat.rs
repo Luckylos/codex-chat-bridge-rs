@@ -984,4 +984,152 @@ mod tests {
         assert!(chat.body.get("tools").is_none());
         assert!(chat.body.get("tool_choice").is_none());
     }
+
+    // --- Media input items and transform-loss accounting ---
+    //
+    // A top-level `input_image` / `input_audio` item either converts to a Chat
+    // content part or is rejected by the URL/format safety check. Rejection is
+    // deliberately silent on the wire (the turn still goes upstream), so the
+    // only trace is a transform-loss event; that accounting is what these
+    // tests pin.
+
+    fn media_item(value: serde_json::Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn safe_image_url_becomes_a_chat_image_part() {
+        let obj = media_item(json!({
+            "type": "input_image",
+            "image_url": "https://example.com/cat.png",
+        }));
+        let mut messages = Vec::new();
+        let mut loss = TransformLossCollector::new();
+
+        handle_media_item(&obj, "input_image", &mut messages, &mut loss);
+
+        assert!(loss.is_empty(), "a safe https URL must not record loss");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        let part = &messages[0]["content"][0];
+        assert_eq!(part["type"], "image_url");
+        assert_eq!(part["image_url"]["url"], "https://example.com/cat.png");
+    }
+
+    #[test]
+    fn unsafe_image_url_is_dropped_and_recorded_as_loss() {
+        // Plain http:// fails the safety check: no message is emitted, and the
+        // drop is accounted for rather than silently swallowed.
+        let obj = media_item(json!({
+            "type": "input_image",
+            "image_url": "http://insecure.example/cat.png",
+        }));
+        let mut messages = Vec::new();
+        let mut loss = TransformLossCollector::new();
+
+        handle_media_item(&obj, "input_image", &mut messages, &mut loss);
+
+        assert!(messages.is_empty(), "rejected media must emit no message");
+        let events = loss.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, TransformLoss::SkippedUnsupportedImage);
+        assert_eq!(events[0].item_type.as_deref(), Some("input_image"));
+    }
+
+    #[test]
+    fn missing_image_url_is_recorded_as_loss() {
+        let obj = media_item(json!({ "type": "input_image" }));
+        let mut messages = Vec::new();
+        let mut loss = TransformLossCollector::new();
+
+        handle_media_item(&obj, "input_image", &mut messages, &mut loss);
+
+        assert!(messages.is_empty());
+        assert_eq!(loss.events().len(), 1);
+    }
+
+    #[test]
+    fn unsupported_audio_is_recorded_under_the_audio_kind() {
+        // Anything not `input_image` routes to the audio converter, so the loss
+        // kind must be the audio one — this is the branch selector inside
+        // `handle_media_item`. `opus` is outside ALLOWED_AUDIO_FORMATS.
+        let obj = media_item(json!({
+            "type": "input_audio",
+            "input_audio": { "data": "AAAA", "format": "opus" },
+        }));
+        let mut messages = Vec::new();
+        let mut loss = TransformLossCollector::new();
+
+        handle_media_item(&obj, "input_audio", &mut messages, &mut loss);
+
+        assert!(messages.is_empty());
+        assert_eq!(
+            loss.events()[0].kind,
+            TransformLoss::SkippedUnsupportedAudio
+        );
+    }
+
+    #[test]
+    fn supported_audio_format_converts_without_loss() {
+        // The accept side of the same branch: a format inside the allowlist
+        // becomes a Chat content part and records nothing.
+        let obj = media_item(json!({
+            "type": "input_audio",
+            "input_audio": { "data": "AAAA", "format": "mp3" },
+        }));
+        let mut messages = Vec::new();
+        let mut loss = TransformLossCollector::new();
+
+        handle_media_item(&obj, "input_audio", &mut messages, &mut loss);
+
+        assert!(loss.is_empty(), "an allowed format must not record loss");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn draining_an_empty_collector_is_a_no_op() {
+        // The early return keeps the metric and the warning log untouched when
+        // a turn had no loss at all — the common case.
+        drain_transform_loss(&TransformLossCollector::new());
+    }
+
+    #[test]
+    fn draining_records_every_event() {
+        let mut loss = TransformLossCollector::new();
+        loss.record(
+            TransformLoss::SkippedUnsupportedImage,
+            Some("input_image"),
+            "bad url".to_owned(),
+        );
+        loss.record(
+            TransformLoss::SkippedUnsupportedAudio,
+            Some("input_audio"),
+            "bad format".to_owned(),
+        );
+
+        // Exercises the metric + summary path; the assertion is that both
+        // events survive to the drain and the call is panic-free.
+        assert_eq!(loss.events().len(), 2);
+        drain_transform_loss(&loss);
+    }
+
+    #[test]
+    fn image_input_item_reaches_the_upstream_message_list() {
+        // End-to-end through the public entrypoint: a media item in `input`
+        // must land in the converted Chat messages.
+        let payload = req_from(json!({
+            "model": "m",
+            "input": [{ "type": "input_image", "image_url": "https://example.com/a.png" }],
+        }));
+        let chat = responses_to_chat(&payload, "m");
+
+        let messages = chat.body["messages"].as_array().unwrap();
+        let has_image = messages.iter().any(|m| {
+            m["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))
+        });
+        assert!(has_image, "converted messages should carry the image part");
+    }
 }
