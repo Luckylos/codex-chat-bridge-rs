@@ -27,6 +27,24 @@
 
 ## B. 值得做的重构（按真实收益排序）
 
+> **状态（2026-07-26 复核）：B 节全部条目已完成。** 下列条目保留为决策记录与
+> 变更依据，不再是待办清单。逐项复核结果：
+>
+> | 条目 | 状态 | 复核依据 |
+> |------|------|----------|
+> | P0 `iter_request_input_items` 去重 | 已完成 | 单一定义于 `context.rs`，其余仅测试引用 |
+> | P1a 消息规范化剥离 | 已完成 | `convert/message_normalization.rs`（537 行） |
+> | P1b tool-args 归拢 | 已完成 | `convert/tool_arguments.rs` |
+> | P2 `kind`/`namespace_strategy` enum 化 | 已完成 | `ToolSpec.kind: ToolKind`，比较全为枚举 |
+> | P3 re-lookup 噪音清理 | 已完成 | `read_state` / `modify_state` / `with_ctx_state_mut` helper 已建立 |
+> | B1 模块级 `dead_code` allow | 已完成 | 全 crate 已无模块级 `#![allow(dead_code)]` |
+>
+> **注意（勿误删）**：现存 7 处 **字段/变体级** `#[allow(dead_code)]`
+> （`config.rs` 三个 upstream 改写字段、`types.rs` 的 `text`、`error.rs` 两个
+> 变体）**不属于 B1，不是残留**。每处都带保留理由：前者是 Python 侧已有、Rust
+> 已解析验证但尚未接线的能力，删除会静默丢失一个 live capability；后者的渲染是
+> 被测试固定的 wire contract。B1 原文把它们一并计入"8 处 stale"是当时的误判。
+
 ### P0 — `iter_request_input_items` 跨模块 copy-paste ｜正确性风险+可维护性
 - `convert.rs:1068`（`&ResponsesRequest`）与 `context.rs:734`（`Option<&Value>`）**body 逐字节相同**（已亲自核实）：同一条 input 规范化规则（bare string→`input_text`）的两份实现。
 - 风险：规则变更（如支持新 bare 类型）须同步改两处，**漏改一处 → 请求转换与 tool-context 对同一 input 静默分歧**。
