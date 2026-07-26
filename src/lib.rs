@@ -42,6 +42,21 @@ mod transform_loss;
 mod types;
 mod upstream;
 
+/// Benchmark-only re-exports of internal conversion entrypoints.
+///
+/// Gated behind the `bench` feature so a normal build's public surface stays
+/// exactly the binary's — these internals never leak into released artifacts or
+/// downstream linkers. `#[doc(hidden)]` keeps them out of the rendered docs
+/// too. The criterion benches under `benches/` are a separate crate and can
+/// only reach `pub` items, so this is the single sanctioned seam for them.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench_api {
+    pub use crate::context::{build_tool_context_from_request, BridgeToolContext};
+    pub use crate::convert::{chat_to_responses, responses_to_chat_with_session};
+    pub use crate::types::{ChatRequest, ResponsesRequest};
+}
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 

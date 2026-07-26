@@ -24,11 +24,23 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Exposes `bench_api`, a `#[doc(hidden)]` re-export of internal conversion
+# entrypoints for the criterion benches. Off by default so the public surface
+# stays exactly the binary's — the internals never leak into a normal build.
+[features]
+bench = []
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 base64 = "0.22"
 proptest = "1"
+criterion = "0.5"
+
+[[bench]]
+name = "conversion"
+harness = false
+required-features = ["bench"]
 
 [profile.release]
 opt-level = 3
