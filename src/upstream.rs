@@ -37,8 +37,19 @@ pub struct Upstream {
 
 impl Upstream {
     pub fn new(config: Config) -> Self {
+        // IDLE (read) timeout, NOT a total-request timeout. reqwest's
+        // `.timeout()` caps the whole request including reading the full body,
+        // so for a streamed LLM response the ENTIRE generation had to finish
+        // within the budget. Long codex generations (reasoning_effort=max,
+        // large contexts) legitimately run 1-2+ minutes and were cut mid-stream
+        // at exactly the timeout — new-api then saw an early EOF with no usage
+        // chunk ("上游没有返回计费信息", 0 tokens). `.read_timeout()` resets on every
+        // received byte, so it only trips on a genuinely stalled upstream,
+        // matching the Python bridge's httpx idle-timeout semantics.
+        let timeout = Duration::from_secs_f64(config.upstream_timeout_seconds);
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs_f64(config.upstream_timeout_seconds))
+            .connect_timeout(timeout)
+            .read_timeout(timeout)
             .build()
             .expect("reqwest client builds with a valid timeout");
         Self { client, config }
