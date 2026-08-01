@@ -6,6 +6,8 @@
 //! Rust — a plain struct whose fields the compiler guarantees are all set, so
 //! no declarative registry or "unset" sentinel is needed.
 
+use std::time::Duration;
+
 use serde_json::{Map, Value};
 
 /// A configuration error surfaced at startup so a malformed override fails
@@ -83,6 +85,51 @@ impl UnsupportedToolPolicy {
     }
 }
 
+/// The upstream HTTP time budgets, split by the phase each one bounds.
+///
+/// Deliberately carries **no total-request budget**: a streamed LLM response
+/// legitimately runs for minutes, so capping the request as a whole truncates
+/// the generation mid-flight — the client sees an early EOF and the gateway
+/// records a usage-less, unbillable turn. Because no "the timeout" scalar is
+/// reachable from this type, no call site can reintroduce a total cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpstreamTimeouts {
+    /// Maximum time to establish the connection.
+    connect: Duration,
+    /// Maximum gap *between* received bytes. Resets on every byte, so it trips
+    /// only on a genuinely stalled upstream, never on a slow-but-alive stream.
+    idle: Duration,
+}
+
+impl UpstreamTimeouts {
+    /// Build from the operator-facing `BRIDGE_UPSTREAM_TIMEOUT_SECONDS` budget,
+    /// which applies **per phase** rather than to the request as a whole.
+    pub fn try_from_seconds(seconds: f64) -> Result<Self, ConfigError> {
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Err(ConfigError::new(
+                format!(
+                    "BRIDGE_UPSTREAM_TIMEOUT_SECONDS must be a finite number > 0, got {seconds}"
+                ),
+                "timeout_invalid",
+            ));
+        }
+        let budget = Duration::from_secs_f64(seconds);
+        Ok(Self {
+            connect: budget,
+            idle: budget,
+        })
+    }
+
+    /// Apply the budgets to a `reqwest` client builder. The single place these
+    /// map onto an HTTP client, so the total-request `.timeout()` is never wired
+    /// in — keeping the invariant enforced here instead of at each call site.
+    pub fn apply(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        builder
+            .connect_timeout(self.connect)
+            .read_timeout(self.idle)
+    }
+}
+
 /// Fully-resolved bridge configuration. Every field is populated by
 /// [`Config::from_env`]; there is no partially-constructed state.
 ///
@@ -92,7 +139,7 @@ pub struct Config {
     pub port: u16,
     pub upstream_base_url: String,
     pub upstream_api_key: String,
-    pub upstream_timeout_seconds: f64,
+    pub upstream_timeouts: UpstreamTimeouts,
     pub upstream_streaming: bool,
     pub upstream_max_retries: u32,
     pub max_concurrent_requests: usize,
@@ -137,16 +184,8 @@ impl Config {
             ));
         }
 
-        let upstream_timeout_seconds = f64_env("BRIDGE_UPSTREAM_TIMEOUT_SECONDS", 60.0)?;
-        if !upstream_timeout_seconds.is_finite() || upstream_timeout_seconds <= 0.0 {
-            return Err(ConfigError::new(
-                format!(
-                    "BRIDGE_UPSTREAM_TIMEOUT_SECONDS must be a finite number > 0, \
-                     got {upstream_timeout_seconds}"
-                ),
-                "timeout_invalid",
-            ));
-        }
+        let upstream_timeouts =
+            UpstreamTimeouts::try_from_seconds(f64_env("BRIDGE_UPSTREAM_TIMEOUT_SECONDS", 60.0)?)?;
 
         let max_concurrent_requests = usize_env("BRIDGE_MAX_CONCURRENT_REQUESTS", 20)?;
         if max_concurrent_requests < 1 {
@@ -180,7 +219,7 @@ impl Config {
             port: u16_env("BRIDGE_PORT", 18090)?,
             upstream_base_url,
             upstream_api_key: str_env("BRIDGE_UPSTREAM_API_KEY", ""),
-            upstream_timeout_seconds,
+            upstream_timeouts,
             upstream_streaming: bool_env("BRIDGE_UPSTREAM_STREAMING", true),
             upstream_max_retries: u32_env("BRIDGE_UPSTREAM_MAX_RETRIES", 2)?,
             max_concurrent_requests,
@@ -216,7 +255,8 @@ impl Config {
             port: 0,
             upstream_base_url: upstream_base_url.into(),
             upstream_api_key: String::new(),
-            upstream_timeout_seconds: 60.0,
+            upstream_timeouts: UpstreamTimeouts::try_from_seconds(60.0)
+                .expect("60s is a valid timeout budget"),
             upstream_streaming: false,
             upstream_max_retries: 2,
             max_concurrent_requests: 20,
@@ -389,7 +429,10 @@ mod tests {
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.upstream_base_url, "http://up/v1"); // trailing slash trimmed
         assert_eq!(cfg.port, 18090);
-        assert_eq!(cfg.upstream_timeout_seconds, 60.0);
+        assert_eq!(
+            cfg.upstream_timeouts,
+            UpstreamTimeouts::try_from_seconds(60.0).unwrap()
+        );
         assert!(cfg.upstream_streaming);
         assert_eq!(cfg.max_concurrent_requests, 20);
         assert_eq!(cfg.unsupported_tool_policy, UnsupportedToolPolicy::Ignore);
@@ -406,6 +449,23 @@ mod tests {
         let err = Config::from_env().unwrap_err();
         assert_eq!(err.code, "tool_policy_invalid");
         clear_bridge_env();
+    }
+
+    #[test]
+    fn upstream_timeouts_reject_non_positive_and_non_finite_budgets() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let err = UpstreamTimeouts::try_from_seconds(bad).unwrap_err();
+            assert_eq!(err.code, "timeout_invalid");
+        }
+    }
+
+    #[test]
+    fn upstream_timeouts_apply_the_budget_to_every_phase() {
+        // The budget is per-phase, so both phases carry the full value rather
+        // than splitting it between them.
+        let t = UpstreamTimeouts::try_from_seconds(2.5).unwrap();
+        assert_eq!(t.connect, Duration::from_secs_f64(2.5));
+        assert_eq!(t.idle, Duration::from_secs_f64(2.5));
     }
 
     #[test]

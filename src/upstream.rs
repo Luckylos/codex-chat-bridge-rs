@@ -37,21 +37,11 @@ pub struct Upstream {
 
 impl Upstream {
     pub fn new(config: Config) -> Self {
-        // IDLE (read) timeout, NOT a total-request timeout. reqwest's
-        // `.timeout()` caps the whole request including reading the full body,
-        // so for a streamed LLM response the ENTIRE generation had to finish
-        // within the budget. Long codex generations (reasoning_effort=max,
-        // large contexts) legitimately run 1-2+ minutes and were cut mid-stream
-        // at exactly the timeout — new-api then saw an early EOF with no usage
-        // chunk ("上游没有返回计费信息", 0 tokens). `.read_timeout()` resets on every
-        // received byte, so it only trips on a genuinely stalled upstream,
-        // matching the Python bridge's httpx idle-timeout semantics.
-        let timeout = Duration::from_secs_f64(config.upstream_timeout_seconds);
-        let client = reqwest::Client::builder()
-            .connect_timeout(timeout)
-            .read_timeout(timeout)
+        let client = config
+            .upstream_timeouts
+            .apply(reqwest::Client::builder())
             .build()
-            .expect("reqwest client builds with a valid timeout");
+            .expect("reqwest client builds with valid timeouts");
         Self { client, config }
     }
 
@@ -841,5 +831,64 @@ mod tests {
             other => panic!("expected Upstream error, got {other:?}"),
         }
         assert_eq!(HITS.load(Ordering::SeqCst), 1, "no retry on 401");
+    }
+
+    #[tokio::test]
+    async fn slow_stream_outlives_the_budget_as_long_as_bytes_keep_arriving() {
+        // REGRESSION: the budget is an *idle* gap, not a cap on the whole
+        // request. A long generation emits bytes steadily for far longer than
+        // the budget; under a total-request timeout it was truncated mid-stream,
+        // costing the trailing usage chunk. Here the per-chunk gap stays under
+        // the budget while the total runtime exceeds it several times over, so
+        // the full stream must still arrive.
+        const CHUNKS: usize = 6;
+        let gap = Duration::from_millis(100);
+        let budget = 0.3; // > gap, but < CHUNKS * gap
+
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                let body = async_stream::stream! {
+                    for i in 0..CHUNKS {
+                        tokio::time::sleep(gap).await;
+                        yield Ok::<_, std::io::Error>(format!("chunk{i};"));
+                    }
+                };
+                axum::body::Body::from_stream(body)
+            }),
+        );
+        let base = spawn_upstream(upstream).await;
+
+        let mut config = Config::for_test(&base);
+        config.upstream_timeouts =
+            crate::config::UpstreamTimeouts::try_from_seconds(budget).unwrap();
+
+        let started = tokio::time::Instant::now();
+        let stream = Upstream::new(config)
+            .create_chat_completion_stream(chat_body())
+            .await
+            .expect("headers arrive within the budget");
+        futures::pin_mut!(stream);
+        let mut received = Vec::new();
+        while let Some(bytes) = stream.next().await {
+            received.extend_from_slice(&bytes);
+        }
+        let body = String::from_utf8(received).expect("utf-8 body");
+
+        // Every chunk survived, and no error frame was substituted for the tail.
+        for i in 0..CHUNKS {
+            assert!(
+                body.contains(&format!("chunk{i};")),
+                "lost chunk {i}: {body}"
+            );
+        }
+        assert!(
+            !body.contains("upstream_stream_error"),
+            "stream was cut short: {body}"
+        );
+        assert!(
+            started.elapsed() > Duration::from_secs_f64(budget),
+            "test must outlive the budget to be meaningful"
+        );
     }
 }
